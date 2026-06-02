@@ -14,7 +14,8 @@ namespace Si_KingOfTheHill
             public bool Enabled = true;
             public bool OnlyInStrategyMode = true;
 
-            public string BuildingPrefab = "Fortress_LargeTower_01";
+            // Note: the KoH prefab is owned by Si_MapBalance (its KohEntry.PrefabName field).
+            // KGT just consumes the spawned GameObject via MapBalanceSpecials.Koh.
             public float CaptureRadius = 50.0f;
             public float BuildExclusionRadius = 75.0f;
 
