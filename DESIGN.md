@@ -1,352 +1,315 @@
-# Si_KingOfTheHill — Design Document
+# Si_KingOfTheHill — King of the Galactic Teleport (KGT)
 
-**Status:** design draft v0.1 — not yet implemented.
-**Game:** Silica (3-team RTS/FPS — Sol/Centauri/Alien).
-**Runtime:** Mono server, MelonLoader 0.7.3.2524, references `net472/` (see Si_UnitBalance memory).
-**Target:** `netstandard2.1`.
-
----
-
-## 1. Concept
-
-A neutral "King of the Hill" (KoH) structure spawns in the middle of the map. Teams compete to control a cylindrical zone around it. The team with the **highest weighted unit count** inside the zone is the current king. When a global capture timer expires, the current king wins the round — overriding the usual "last HQ standing" condition.
-
-Original win condition is **not** removed: a team that destroys all enemy HQ/Queen structures before the KoH timer expires still wins normally. KoH is an *additional* path to victory.
+**Status:** v0.3.0 (released)
+**Game:** Silica (3-team RTS/FPS — Sol / Centauri / Alien)
+**Runtime:** MelonLoader 0.7.3+ on Mono dedicated server (references `MelonLoader\net472\` DLLs; target `netstandard2.1`)
+**Server-only** mod. No client component required.
 
 ---
 
-## 2. KoH Building
+## 1. Overview
 
-- **Prefab:** `Fortress_LargeTower_01` — confirmed to exist at `Assets/GameObject/Fortress_LargeTower_01.prefab`. It is a pure visual hierarchy of concrete walls + meshes with **no `DamageManager`, no `ObjectInfo`, no `Structure` script**. Treat it as a static decorative prop — no native gameplay behavior.
-- **Damage immunity:** N/A — the building has no damage system to begin with. Harmony patches not needed for this aspect.
-- **Ownership:** the building stays neutral (no Team assignment possible without a Structure component). King ownership is expressed entirely through the custom overlay UI and chat broadcasts.
-- **Progress display — custom overlay:** since there is no native health bar, render our own. Two layers:
-  - **World-space billboard** above the tower (Unity `Canvas` set to `WorldSpace`) with a horizontal fill bar tinted to the current king's team color, plus countdown text.
-  - **Periodic chat broadcasts** as a fallback / low-tech audit trail (every minute + last 10s).
-- **Visual flair (optional):** colored point light or particle effect at the tower base tinted to the king's team color. Falls back to neutral white when no king is held.
+A neutral structure (the "Galactic Teleporter") spawns at the centre of each map. Teams compete to control a cylindrical zone around it; whichever team holds the majority of weighted force in the zone fills a shared capture meter. When the meter hits a configurable threshold, the dominating team wins the round — losing teams' critical structures are destroyed by a cinematic finishing force so Silica's natural end-of-round flow resolves.
 
-**Spawning:** runtime `GameObject.Instantiate` at the configured per-map position (see §10). On `OnGameStarted` / map-load, the mod looks up the prefab in `GameDatabase.Database` (or via `Resources.FindObjectsOfTypeAll<GameObject>()` matching on name as a fallback) and instantiates it server-side. Network replication of a static-prop type is uncertain — see §11 risk.
+Players accrue **credits** for kills + zone presence and spend them via a `/buy` chat menu that spawns purchased units on their team.
 
 ---
 
-## 3. Capture Zone
+## 2. Building & spawn
 
-- **Shape:** vertical cylinder (a.k.a. "tube" / column) centered on the KoH building.
-  - X/Z check uses 2D distance.
-  - Y is unbounded — air units count.
-- **Radius:** configurable (default suggestion: 40-60m, tuned in playtest).
-- **Build-exclusion radius:** larger than capture radius (default: 1.5× capture radius). Enemies (non-neutral teams) cannot construct any structure inside this radius. Own team's units / pre-existing structures unaffected.
+- **Prefab:** `Sol_UltraHeavyFactory` (a networked structure — replicates to clients). Earlier prototype tried `Fortress_LargeTower_01` (decorative-only, no NetworkComponent → couldn't replicate).
+- **Spawn team:** `Wildlife` (resolved at runtime — see §6 for the team-priority logic). Keeps the AI hostile-target check happy when paired with the GetTeamsAreEnemy bypass.
+- **Placement:** Si_MapBalance is the spawner. It reads `koh: { x, z, capture_radius, exclusion_radius }` from the per-map layout JSON in `UserData/Spawns/{Map}/*.json` and instantiates the prefab during its `MusicJukeboxHandler.OnGameStarted` Harmony postfix.
+- **Public API:** `Si_MapBalance.MapBalanceSpecials.Koh` exposes `{ Obj, CaptureRadius, ExclusionRadius }`. Si_KingOfTheHill subscribes via reflection to `MapBalanceSpecials.OnSpecialsReady` to receive the reference (no compile-time dependency between the two mods).
 
----
-
-## 4. Ownership & King Logic
-
-- **Tick rate:** evaluated every N seconds (default 1s; configurable as `EvalIntervalSeconds`).
-- Each tick:
-  1. Enumerate all live units in the cylinder.
-  2. Group by team.
-  3. Sum weighted points per team (see §5).
-  4. The team with the **highest non-zero sum** is the **provisional king**.
-  5. If the provisional king == current king → reset handover timer.
-  6. If the provisional king ≠ current king → start/continue handover timer.
-  7. When handover timer reaches `OwnershipHandoverDelay` (default: 5s), commit the new king.
-- **Empty zone:** no team has any units inside.
-  - Capture countdown **freezes** (does not rewind) — debatable, see Open Questions §11.
-  - Current king is retained (no neutral state once captured).
-- **Single team in zone:** that team is king after handover delay (even if only 1 unit).
-- **Pre-capture state:** before any team has ever held the building, ownership is `None`. The global capture timer does NOT tick during `None`.
+If no KoH is configured for the active map, KGT broadcasts `[KGT] mod not active, spawn cfg missing` at round start (3s grace) and stays inert.
 
 ---
 
-## 5. Unit Weighting
+## 3. Capture zone
 
-**Base weight = unit's `unit_cap_value`** (the slot count the unit occupies in its team's unit cap — same field Si_UnitBalance reads via `ObjectInfo`). The more cap a unit eats, the more it's worth as a KoH presence. Self-balances against the game's existing cost/cap economy.
+- **Shape:** vertical cylinder centred on the KoH position. X/Z radius = `Cfg.CaptureRadius` (default 50m; web-tool-configured per map). Y unbounded — air units count.
+- **No-build exclusion:** larger radius (`Cfg.BuildExclusionRadius`, default 75m) defined but not yet enforced.
 
-**Final weight formula:**
+---
 
-```
-weight = unit_cap_value × CategoryMultiplier × (player_controlled ? PlayerControlledMultiplier : 1)
-```
+## 4. Capture mechanics (accumulation model)
 
-### Auto-classifier from production building (`built_at`)
+Each tick (default 1s, `Cfg.EvalIntervalSeconds`):
 
-The Si_UnitBalance dump exposes `built_at` per unit — the production building name. That IS the natural category. Extracted from `Si_UnitBalance_Dump.json`:
+1. **Enumerate units in the cylinder** (`Unit.Units` filter). For each live, non-destroyed, controlled or AI unit:
+   - `weight = unit_cap_value × CategoryMultiplier × PlayerControlledMultiplier`
+   - `unit_cap_value` comes from `Si_UnitBalance_Dump.json` (Si_UnitBalance dependency)
+   - `CategoryMultiplier` is keyed by the unit's production building (`built_at` field — Barracks, Light Factory, Lesser Spawning Cyst, …). All default to 1.0; admins can tune per-category. Crab gets `PerUnitOverride = 0.25`.
+   - `PlayerControlledMultiplier` = 2.0 when `unit.ControlledBy != null`
+2. **Sum per team** → `Dictionary<Team, float> scores`.
+3. **Dominance check:** team with `score >= total * Cfg.DominanceThreshold` (default 0.60) is the **dominant team** this tick. If no team hits the threshold → **contested** (no accumulation).
+4. **Smoothed king transition:** dominant team must hold dominance for `Cfg.OwnershipHandoverDelay` (default 3s) to become the committed king. Prevents flicker on close fights.
+5. **Accumulation:** while dominant team == current king:
+   - `gain = min(king_score, MaxCapturePointsPerSecond × tickInterval)` — capped at e.g. 100/tick
+   - **Cumulative mode (default):** added to a single shared bucket `_totalAccumulated`. A new king continues where the previous king left off.
+   - **Per-team mode** (`CumulativeAccumulation = false`): each team has their own bucket; only the current king's bucket fills.
+6. **Win check:** `_totalAccumulated >= WinThreshold` → `TriggerWin(currentKing)`.
 
-| `built_at` value | Category | Faction(s) |
+### Win threshold
+
+- Default: 50,000 points (`Cfg.WinThreshold`)
+- Per-map override: `Cfg.WinThresholdPerMap[sceneName]` — populated for all 13 stock maps; admins tune by map size
+
+---
+
+## 5. Outpost ring (capture clock)
+
+- **N = `Cfg.OutpostCount` outposts** (default 12) spawn around the capture-radius perimeter at angles `i * 360°/N`, **buried `Cfg.OutpostBuryDepth` metres** (default 30) below the raycast-true surface — visible on radar only.
+- **Acts as a clock:** the first M outposts (M = round(N × progress%)) are spawned on the **current king's team**; the rest stay on the Wildlife team. As capture progresses, more outposts flip to the king's colour — a slow radial radar fill.
+- **Lifecycle:** initial spawn on KoH acquisition (0 king, all neutral). Re-spawned only when (kingTeam, kingCount) changes. Cleaned up on round end.
+
+---
+
+## 6. AI targeting + damage immunity
+
+### AI targeting bypass
+
+Harmony postfix on `GameMode.GetTeamsAreEnemy(Team, Team)`. If either team is identified as neutral (TeamShortName or GO name contains "Master" / "Wildlife" / "Worm"), result is forced to `false` ("not enemies"). Mirrors Si_4way's alliance pattern.
+
+- Cached per-team in a `Dictionary<object, bool>` so hot-path cost is ~50ns/call (the game fires this method 100K+ times/sec).
+- Short-circuits when `!_hasKoh` so non-KoH rounds pay zero overhead.
+
+### Damage immunity (4 patches)
+
+Player + AI weapons + sell actions all eventually call `DamageManager.SomeMethod` on the target. Each path needed a separate Harmony prefix:
+
+| Patch target | Path it blocks |
+|---|---|
+| `DamageManager.ApplyDamage(Collider, float, EDamageType, GameObject, Vector3)` | Server-side AI projectile / melee |
+| `DamageManager.SetHealth(float, GameObject, bool)` | Direct health writes (network sync, debug) |
+| `DamageManager.SetHealth01(float)` | Player sell/demolish (`StrategyMode.PerformDestroyStructure` calls this with 0f) |
+| `DamageManager.OnReceiveClientDamageHitPacket(GameByteStreamReader)` | **Player-controlled-unit damage** — client computes hit, sends packet, server does `Health -= value` (bypasses ApplyDamage) |
+
+All 4 walk the parent chain from the DamageManager's transform looking for the cached KoH GameObject; if found, the call is short-circuited (no health change). Diagnostic counters log first 5 HIT + 5 MISS per round.
+
+---
+
+## 7. Chat narration (British English, team-coloured)
+
+All user-facing messages use `[KGT]` prefix. Team names render in faction colour:
+
+| Team | Hex |
+|---|---|
+| Sol | `#328cff` (blue) |
+| Centauri | `#eb4646` (red) |
+| Alien | `#50c832` (green) |
+| Wildlife | `#c8963c` (brown) |
+| Percentage (uranium-green) | `#39ff14` |
+
+### Event messages
+
+- **Round intro** (5-line block, fires on first KoH acquisition each round): explains capture mechanic + `/koh`
+- **First king commit:** `The contest for the King of the Galactic Teleporter has commenced — Sol have asserted their claim.`
+- **King transfer:** `Cent have wrested the Galactic Teleporter from Sol.`
+- **Milestones** (25/50/75/95%): e.g. `Sol have claimed a quarter of the hill — 25%.`
+- **Periodic status** (every `StatusAnnounceIntervalSeconds`, default 60s): `Sol presently hold 45% of the hill.`
+- **Win:** per-team — `Sol Wins - Sol lives forever` / `Centauri Wins - Get outta here` / `Alien wins - Praise the Queen motherfuckers` (all editable in config)
+- **Player enter/exit zone** (private to that player): `You have entered the king's domain.` / `…departed…`
+
+---
+
+## 8. Sound system (SilicaAdminMod AudioHelper)
+
+All WAVs at 12 kHz / mono / 8-bit PCM (AudioHelper voice-packet format). Generated via `edge-tts` (British voices: SoniaNeural for milestones, RyanNeural for Sol, ThomasNeural for Centauri, US GuyNeural for Alien).
+
+| Event | Sound |
+|---|---|
+| First capture | `first_capture.wav` — "The contest for the King of the Galactic Teleporter has commenced." |
+| 25% / 50% / 75% / 95% milestones | `milestone_25.wav`, `milestone_50.wav`, `milestone_75.wav`, `milestone_95.wav` |
+| Win (Sol) | `sol_wins.wav` — "Sol wins. Sol lives forever." |
+| Win (Centauri) | `centauri_wins.wav` — "Centauri wins. Get outta here." |
+| Win (Alien) | `alien_wins.wav` — "Alien wins. Praise the queen, motherfuckers." |
+| Finishing force spawn | `cannon_boom.wav` (Si_CrabCannon's existing sound) |
+
+Win sounds are re-encoded at +6 dB so they punch through ambient game audio. Cannon boom + finishing-force spawn is deferred by `Cfg.WinFinishingForceDelaySeconds` (default 4s) so it doesn't overlap the win voice line.
+
+---
+
+## 9. End-game finishing force
+
+At `TriggerWin(winner)`:
+
+1. Win chat + voice line fire immediately.
+2. After `WinFinishingForceDelaySeconds`: cannon boom + spawn the winner's signature unit at every losing team's critical:
+
+| Winner | Per human HQ | Per Alien Queen | Drop style |
+|---|---|---|---|
+| **Alien** | 8 Goliaths drop from +80m above the HQ (gravity + jitter) | 8 Goliaths on Queen | Vertical fall |
+| **Sol** | 8 Siege Tanks in a ring (40m radius, facing inward) | 16 Siege Tanks | Ground ring |
+| **Centauri** | 8 Crimson Tanks in a ring | 16 Crimson Tanks | Ground ring |
+
+3. Units engage naturally → destroy the criticals → game's natural "only one team has criticals" win flow resolves.
+4. **Safety fallback** after `WIN_FORCE_FALLBACK_SECONDS` (60s): if any losing critical is still alive (terrain blocked the units, etc.), force-destroy via `SetHealth01(0)`.
+
+Critical detection covers both `team.Structures` (Sol/Cent HQs) and `team.Units` (Alien Queen).
+
+---
+
+## 10. Reward system
+
+### Sources
+
+| Trigger | Formula | Default |
 |---|---|---|
-| `Barracks` | **Infantry** | Sol, Centauri |
-| `Light Factory` | **LightVehicle** | Sol, Centauri |
-| `Heavy Factory` | **HeavyVehicle** | Sol, Centauri |
-| `Ultra Heavy Factory` | **UltraHeavyVehicle** | Sol, Centauri |
-| `Air Factory` | **Air** | Sol, Centauri |
-| `Lesser Spawning Cyst` | **LesserAlien** | Alien |
-| `Greater Spawning Cyst` | **GreaterAlien** | Alien |
-| `Grand Spawning Cyst` | **GrandSpawner** | Alien |
-| `Colossal Spawning Cyst` | **ColossalAlien** | Alien |
-| *(empty)* | **Auxiliary** | Harvesters, Hover Bike, Sports Car, Queen, Worms |
+| Kill enemy unit (`GameEvents.OnUnitDestroyed`) | `round(unit_cost × RewardKillFraction)` | 10% of cost |
+| Destroy enemy structure (`GameEvents.OnStructureDestroyed`) | `round(structure_cost × RewardKillFraction)` | 10% of cost |
+| Hold a controlled unit in zone (per tick) | `round(EvalInterval × unit_cap × RewardZonePresenceMultiplier)` | tick × cap × 2 |
 
-All multipliers default to **1.0** so weight = unit_cap_value directly.
+Crab's 0.25 scoring penalty is **NOT** applied to reward calc (`RewardZoneCrabSkipPenalty = true`). Friendly-fire kills earn no reward.
 
-### Default CategoryMultiplier table
+### Cost source
 
-| Category | Multiplier | Notes |
-|---|---|---|
-| Infantry | 1.0 | |
-| LightVehicle | 1.0 | |
-| HeavyVehicle | 1.0 | |
-| UltraHeavyVehicle | 1.0 | Siege Tank, Crimson Tank (cap 6) |
-| Air | 1.0 | Cap already differentiates Bomber/Freighter (5) from Fighter (3) |
-| LesserAlien | 1.0 | |
-| GreaterAlien | 1.0 | |
-| GrandSpawner | 1.0 | Goliath only |
-| ColossalAlien | 1.0 | Colossus (cap 15), Defiler (cap 8) — flag, see §11 |
-| Auxiliary | 0.0 | Harvesters etc. — don't count toward KoH |
+`Si_UnitBalance_Dump.json` provides baseline costs. At each round start, `RefreshLiveUnitCosts()` scans `Resources.FindObjectsOfTypeAll<ConstructionData>()` and overwrites `_unitCost[name]` with the live `ResourceCost` value — so Si_UnitBalance's runtime cost overrides flow through to reward calc.
 
-### Computed weights at default multipliers (auditable preview)
+### Persistence
 
-Drawn from the current `Si_UnitBalance_Dump.json`. Numbers = `cap × 1.0`.
+Credits live in `Dictionary<long /*SteamID*/, int>`. Reset between rounds when `RewardResetOnGameEnd = true` (default).
 
-**Sol Infantry:** Rifleman 1, Scout 1, Heavy 2, Sniper 2, Commando 2
-**Sol Light:** Light Quad 1, Light Striker 2, Heavy Quad 2, Platoon Hauler 2, Heavy Striker 3, AA Truck 3
-**Sol Heavy:** Hover Tank 3, Pulse Truck 3, Barrage Truck 3, Railgun Tank 4
-**Sol Ultra:** Siege Tank 6
-**Sol Air:** Gunship 2, Fighter 3, Dropship 4, **Bomber 5**
+---
 
-**Centauri Infantry:** Militia 1, Trooper 1, Juggernaut 2, Marksman 2, Templar 2
-**Centauri Light:** Light Raider 1, Heavy Raider 2, Assault Car 2, Squad Transport 2, Flak Car 3, Strike Tank 3
-**Centauri Heavy:** Combat Tank 3, Pyro Tank 3, Heavy Tank 4, Rocket Tank 4
-**Centauri Ultra:** Crimson Tank 6
-**Centauri Air:** Interceptor 2, Dreadnought 3, Shuttle 4, **Freighter 5**
+## 11. /buy command (multi-step chat menu)
 
-**Alien Lesser:** Crab → **0.25** (special), Shrimp 1, Squid 1, Wasp 1, Dragonfly 2, Shocker 2
-**Alien Greater:** Hunter 1, Behemoth 2, Horned Crab 2 (or 0.5 — see §11 Q7), Firebug 3, Scorpion 3
-**Alien Grand:** Goliath 4
-**Alien Colossal:** Defiler 8, **Colossus 15** (see §11 Q6)
+### Flow
 
-### Per-unit override (escape hatch for Crab + edge cases)
-
-```jsonc
-"PerUnitOverride": {
-  "Crab": 0.25            // applied to the unit's cap (so weight = 1 × 0.25 = 0.25)
-  // "Horned Crab": 0.25  // TBD — see §11 Q7
-  // "Colossus": 0.5      // example: cap Colossus down if 15 too high in practice
-}
+```
+/buy           → open menu at Categories level (Barracks / Light / Heavy / Ultra / Air,
+                 or Lesser/Greater/Grand/Colossal Spawning Cyst for Alien)
+/1 ... /N      → select option (drill into category, or buy unit when in unit list)
+/back          → up one level
+/0             → close
+/buy 1, /buy back, /buy exit ← legacy/fallback forms; all still work
 ```
 
-Lookup precedence: `PerUnitOverride[unit_name]` (multiplier) → `CategoryMultiplier[category]` → `1.0`.
+### Chat routing
 
-### Player-controlled multiplier
+`/1`-`/N` are owned by Si_UnitBalanceUI for its own menus. KGT subscribes to `SilicaAdminMod.Event_Chat.OnRequestPlayerChat` (fires BEFORE the chat-block decision) instead of registering its own `/1`-`/N` commands. Only acts when the calling player has an open `/buy` menu, sets `args.Block = true` to suppress the chat line. No registration conflict with UB.
 
-`PlayerControlledMultiplier`: default **2.0**. Applied when `unit == player.ControlledUnit` for some live `Player`.
+### Purchase rules
 
-### Dead / invalid units
-
-Filter `unit.IsDestroyed == false` and `unit.ObjectInfo != null` before counting.
-
-### Why unit-cap-based works well
-
-- The game already balances `unit_cap_value` carefully — Goliath at cap 4 vs Rifleman at cap 1 is a deliberate ratio. We inherit that for free.
-- The original spec's hand-picked weights (1 / 2 / 2.5 / 3 / 3.5 / 5) map close to actual cap values, just without the conceptual lookup table — cap IS the lookup.
-- Future / modded units are auto-classified by `built_at`. Any new unit with an unrecognized `built_at` falls back to the `Infantry` category multiplier (configurable).
+- Must be **controlling a unit** (refused otherwise — that's the spawn anchor).
+- Spawn position = `Cfg.BuySpawnDistance` (15m) in front of player's controlled unit's facing.
+- Refused if spawn would land within `Cfg.BuyMinDistanceFromEnemyCritical` (400m default) of any enemy HQ / Nest / Queen — anti-rush guard. Checks both `team.Structures` and `team.Units` with `ObjectInfo.Critical == true`.
+- Unit appears on **player's team** (passed to `Game.SpawnPrefab` so it's baked into the SendNetSpawn packet — see [[project_silica_team_networking]] memory).
 
 ---
 
-## 6. Capture Countdown
+## 12. Admin/player commands
 
-- **Duration:** `CaptureSeconds` (default 600s = 10 minutes — configurable).
-- Starts ticking down the first time any team becomes the king.
-- Does **not** reset on ownership transfer — same global timer keeps counting down.
-- Pauses on `None` ownership (zone empty).
-- Periodic chat broadcasts:
-  - On capture start: "[KoH] First contact — capture begins (10:00 to king's victory)"
-  - On ownership change: "[KoH] {Team} is now king of the hill"
-  - Every minute: "[KoH] {RemainingMin}m to {Team} victory"
-  - Last 10s: per-second countdown
-  - At zero: trigger KoH win path (see §8).
-
----
-
-## 7. Anti-Build Rule
-
-- Inside the build-exclusion radius, any **non-owning-team** construction attempt is denied.
-- "Non-owning-team" = any team that is NOT the current king.
-- Implementation: Harmony prefix on the structure-construction entry point (likely `Structure.Construct` or the placement-request RPC). Check the target position vs KoH center; if inside exclusion radius AND building team != current king, deny placement and send chat feedback ("[KoH] Cannot build inside enemy hill zone").
-- If `current king == None`, all teams are blocked from building in the zone.
-- Already-placed structures are untouched (no retroactive removal).
+| Command | Visibility | Effect |
+|---|---|---|
+| `/koh` | All players | Status: on/off, radii, current king + progress %, last-tick gain vs cap (CAPPED / below cap / contested) |
+| `/koh status` | Same as `/koh` | — |
+| `/koh on` / `/koh off` | Admin (Power.Generic) | Master toggle |
+| `/koh radius <m>` | Admin | Set capture radius |
+| `/koh threshold <pts>` | Admin | Set WinThreshold (global default) |
+| `/koh rate <pts/s>` | Admin | Set MaxCapturePointsPerSecond |
+| `/koh reset` | Admin | Clear king state mid-round (testing) |
+| `/buy` | All players | Open buy menu / refresh current view |
+| `/1` … `/N`, `/back`, `/0` | All players (state-gated) | Buy menu navigation when menu is open |
 
 ---
 
-## 8. Win Conditions
+## 13. Dependencies
 
-Two parallel win paths:
-
-1. **Original (HQ destruction):** if a team destroys all opposing HQ/Queen structures before the KoH timer expires, original game logic resolves the round normally. The KoH timer is irrelevant.
-2. **KoH timer expiry:** when the capture countdown reaches zero AND a team is the current king, that team wins immediately, regardless of HQ status.
-
-**Tie-handling:** if the timer hits zero on a `None` ownership (shouldn't happen because timer is paused) → no KoH win, original logic continues.
-
-**Implementation:** locate the existing round-end / victory-decision entry point (likely `StrategyMode.OnTeamVictory` or `GameMode.SetWinningTeam` — to be confirmed during prototyping). Call that with the KoH-king team. Verify with the unit-balance HQ-decay logic which already touches end-of-round flow.
+- **Si_MapBalance** (required): spawns the KoH building from per-map layout JSON, exposes `MapBalanceSpecials.Koh` to KGT.
+- **Si_UnitBalance** (required for unit categorisation + cost lookup): KGT reads `Si_UnitBalance_Dump.json` for unit→category mapping + base costs. Live cost refresh uses `ConstructionData.ResourceCost` (which Si_UnitBalance's OverrideManager modifies).
+- **SilicaAdminMod** (required): `AudioHelper.PlaySoundFile` for sound playback; `HelperMethods.SendChatMessageToPlayer` for chat; `Event_Chat.OnRequestPlayerChat` for /1-/N nav hook.
+- **MelonLoader** + **Newtonsoft.Json** + **0Harmony** + Unity refs (CoreModule, TerrainModule, PhysicsModule).
 
 ---
 
-## 9. Config JSON Schema
+## 14. Config layout
 
-File: `UserData/KingOfTheHill_cfg/Si_KingOfTheHill_Config.json` (created on first load with defaults).
+`UserData/KingOfTheHill_cfg/Si_KingOfTheHill_Config.json` — auto-generated on first load; auto-resaved on every load so new fields appear with their defaults while preserving customisations.
+
+Key sections (full schema in `Config.cs`):
 
 ```jsonc
 {
   "Enabled": true,
-  "BuildingPrefab": "Fortress_LargeTower_01",
+  "OnlyInStrategyMode": true,
   "CaptureRadius": 50.0,
   "BuildExclusionRadius": 75.0,
   "EvalIntervalSeconds": 1.0,
-  "OwnershipHandoverDelay": 5.0,
-  "CaptureSeconds": 600.0,
+  "OwnershipHandoverDelay": 3.0,
+
+  "WinThreshold": 50000.0,
+  "MaxCapturePointsPerSecond": 100.0,
+  "DominanceThreshold": 0.60,
+  "CumulativeAccumulation": true,
+
+  "WinThresholdPerMap": { "Badlands": 50000, "BlackIsle": 50000, … },
+
   "PlayerControlledMultiplier": 2.0,
+  "BuildingToCategory": { "Barracks": "Infantry", "Light Factory": "LightVehicle", … },
+  "CategoryMultiplier": { "Infantry": 1.0, … },
+  "PerUnitOverride": { "Crab": 0.25 },
 
-  // Base weight per unit = ObjectInfo.unit_cap_value (read at runtime).
-  // Category is derived from the unit's production building ("built_at" in Si_UnitBalance dump).
-  // Final weight = unit_cap_value * Multiplier
-  // Multiplier = PerUnitOverride[name]  if present
-  //            else CategoryMultiplier[ BuildingToCategory[built_at] ]
-  //            else CategoryMultiplier["Infantry"]
-  // Then × PlayerControlledMultiplier if the unit is currently controlled by a Player.
+  "OutpostCount": 12,
+  "OutpostBuryDepth": 30.0,
 
-  "BuildingToCategory": {
-    "Barracks":               "Infantry",
-    "Light Factory":          "LightVehicle",
-    "Heavy Factory":          "HeavyVehicle",
-    "Ultra Heavy Factory":    "UltraHeavyVehicle",
-    "Air Factory":            "Air",
-    "Lesser Spawning Cyst":   "LesserAlien",
-    "Greater Spawning Cyst":  "GreaterAlien",
-    "Grand Spawning Cyst":    "GrandSpawner",
-    "Colossal Spawning Cyst": "ColossalAlien"
-    // unmatched / empty built_at -> "Auxiliary" (harvesters, hover bike, etc.)
-  },
+  "EnterExitNotifications": true,
+  "StatusAnnounceIntervalSeconds": 60.0,
 
-  "CategoryMultiplier": {
-    "Infantry":          1.0,
-    "LightVehicle":      1.0,
-    "HeavyVehicle":      1.0,
-    "UltraHeavyVehicle": 1.0,
-    "Air":               1.0,
-    "LesserAlien":       1.0,
-    "GreaterAlien":      1.0,
-    "GrandSpawner":      1.0,
-    "ColossalAlien":     1.0,
-    "Auxiliary":         0.0
-  },
+  "RewardKillFraction": 0.10,
+  "RewardZonePresenceMultiplier": 2.0,
+  "RewardZoneCrabSkipPenalty": true,
+  "RewardResetOnGameEnd": true,
+  "BuySpawnDistance": 15.0,
+  "BuyMinDistanceFromEnemyCritical": 400.0,
 
-  "PerUnitOverride": {
-    "Crab": 0.25
-    // optional escape hatch — add unit-name -> multiplier here.
-    // Wins over CategoryMultiplier.
-  },
+  "WinFinishingForceDelaySeconds": 4.0,
+  "SoundFirstCapture": "sounds/first_capture.wav",
+  "SoundMilestone25":  "sounds/milestone_25.wav",
+  "SoundMilestone50":  "sounds/milestone_50.wav",
+  "SoundMilestone75":  "sounds/milestone_75.wav",
+  "SoundMilestone95":  "sounds/milestone_95.wav",
+  "SoundFinishingForce": "sounds/cannon_boom.wav",
+  "SoundWinSol":       "sounds/sol_wins.wav",
+  "SoundWinCentauri":  "sounds/centauri_wins.wav",
+  "SoundWinAlien":     "sounds/alien_wins.wav",
 
-  "DefaultCategoryForUnknown": "Infantry",
-
-  "AnnounceEveryMinute": true,
-  "AnnounceLast10s": true
+  "WinMessageSol":      "Sol Wins - Sol lives forever",
+  "WinMessageCentauri": "Centauri Wins - Get outta here",
+  "WinMessageAlien":    "Alien wins - Praise the Queen motherfuckers",
+  "WinMessageDefault":  "{name} have conquered the hill — a most resounding victory!"
 }
 ```
 
-Plus per-map override for KoH spawn position (since map center varies):
-
-```jsonc
-"MapPositions": {
-  "Badlands":           { "x": 0,   "y": 50,  "z": 0 },
-  "IndustrialQuarter":  { "x": 12,  "y": 45,  "z": -8 }
-}
-```
-
-If a map isn't in the table, fall back to map center via terrain bounds OR disable the mod for that map (configurable).
-
 ---
 
-## 10. Admin / Chat Commands (TBD)
-
-Tentative — confirm naming with DrMuck before implementing:
-
-| Command | Power | Effect |
-|---|---|---|
-| `/koh` | none / player | Show current status: king, time remaining, weighted scores per team |
-| `/koh on` / `/koh off` | Generic | Master toggle (round-scoped) |
-| `/koh status` | Generic | Detailed dump for current map |
-| `/koh time <seconds>` | Generic | Set capture duration |
-| `/koh radius <m>` | Generic | Set capture radius |
-| `/koh reset` | Generic | Reset capture timer to full, clear king |
-| `/koh weight <category> <value>` | Generic | Adjust a weight at runtime |
-
----
-
-## 11. Decisions Made & Remaining Open Questions
-
-### Decided (v0.2)
-
-1. **Building:** `Fortress_LargeTower_01` confirmed present at `Assets/GameObject/Fortress_LargeTower_01.prefab`. Pure static visual prop — no `DamageManager` / `ObjectInfo` / `Structure` components. Treated as decoration only.
-2. **Progress display:** custom overlay — world-space billboard above tower + chat broadcasts. No native healthbar to drive.
-3. **Empty zone behavior:** **freeze timer**. Current king retained until someone re-enters.
-4. **Placement:** **runtime instantiation** at configured per-map position via `MapPositions` JSON.
-5. **Weighting model:** `unit_cap_value × CategoryMultiplier × PlayerControlledMultiplier` (no flat weight table). Category auto-derived from `built_at`.
-6. **Crab:** `PerUnitOverride["Crab"] = 0.25` (effective weight 0.25).
-
-### Still open (need answers / research during implementation)
-
-1. **(?) Prefab loading** — best way to obtain `Fortress_LargeTower_01` at runtime. Try (a) `GameDatabase.Database` lookup, (b) `Resources.FindObjectsOfTypeAll<GameObject>()` filtered by name, (c) `AssetBundle`. Prototype during impl.
-2. **(?) Network replication of a static prop** — instantiated server-side, will clients see it? Static props normally come from the map file. May need a `NetworkObject` / `BaseGameObject` wrapper to force replication. Risk: clients see nothing while server sees the tower. Fallback: server-only logic + chat-broadcast progress (no visible tower, just zone gameplay).
-3. **(?) Round-end hook** — confirm API for forcing a team win mid-round. The HQ-decay system already destroys HQs to trigger natural loss — may piggyback (on KoH win, force-destroy losing teams' HQs to use the existing win flow). Inspect `StrategyMode`, `GameMode`, `MusicJukeboxHandler.OnGameEnded` during impl.
-4. **(?) Build-exclusion enforcement point** — `Structure.Construct`, build-request RPC, or placement-validate? Whichever runs server-side first. Likely the same hook Si_BuildLimits uses.
-5. **(?) `unit_cap_value` field/property location** — confirm exact accessor on `ObjectInfo` under Il2Cpp (Si_UnitBalance already reads it; reuse that path).
-6. **(?) Colossus cap-15 outlier** — Colossus has `unit_cap_value=15`, so default weight 15 (3× Goliath). May dominate KoH if 2-3 are in zone. Options: cap multiplier (e.g. PerUnitOverride 0.5 → 7.5), or accept — Colossus is meant to be game-deciding. Flag for playtest.
-7. **(?) Horned Crab classification** — `Horned Crab` is in `Greater Spawning Cyst` (cap 2), not Lesser. User spec said "crabs = 0.25". Does that include Horned Crab? Current draft: only `Crab` gets 0.25; Horned Crab defaults to GreaterAlien×1.0 = weight 2. Confirm.
-8. **(?) Pre-capture timer visibility** — show grayed-out timer + "waiting for first contact" before anyone captures, or hide? Default: show.
-9. **(?) Air unit positions** — verify air units expose accurate world-position via `unit.transform.position`. Should be fine; flag during testing.
-10. **(?) Game-mode scope** — KoH only makes sense in Strategy mode. Add `OnlyInStrategyMode = true` config flag (default on).
-11. **(?) Multi-tower / multi-KoH** — single tower per map only, or support multiple capture points (best-of-N)? Default: single. Future extension if requested.
-
----
-
-## 12. Implementation Plan (post-decision)
-
-Once §11 questions are answered:
-
-1. **Skeleton** — `Si_KingOfTheHill.cs` MelonMod with `OnInitializeMelon`, config load, command registration.
-2. **Spawn / locate KoH** — on `GameEvents.OnGameStarted` or `OnLevelLoaded`, instantiate or find the KoH building, cache its transform.
-3. **Damage immunity** — Harmony patch on DamageManager.
-4. **Zone evaluator** — per-tick `Update()` (gated to `EvalIntervalSeconds`) that walks unit lists, computes weighted scores, updates ownership state machine.
-5. **Capture timer** — global float, decremented per tick when a king is held.
-6. **Visual indicator** — drive health bar or send broadcast text.
-7. **Anti-build patch** — Harmony prefix on construction entry.
-8. **Win trigger** — at timer zero, call the round-end forcing function.
-9. **Commands** — `/koh` family.
-10. **Config persistence** — load + save JSON (use `root.ToString()` NOT `ToString(Formatting.Indented)` — Mono Newtonsoft doesn't have the overload, per Si_UnitBalance fix).
-
----
-
-## 13. Risks
-
-- **Crash risk:** runtime instantiation of a prefab not designed to spawn dynamically may NRE or fail to network-replicate. Mitigation: prefer map-placed if Fortress_LargeTower_01 is finicky.
-- **Game-mode interaction:** Silica has multiple game modes (Strategy, etc.). KoH may only make sense in Strategy mode. Add `OnlyInStrategyMode` config flag.
-- **Win-condition double-fire:** if a team destroys all enemy HQs in the same tick the KoH timer expires, the original win path and KoH path could both fire. Add precedence rule: whichever fires first wins; second is suppressed.
-- **AdminMod 2.13.36 transpiler regression** (per memory) — DrMuck rolled back to 2.13.19. Build/test against 2.13.19 specifically.
-
----
-
-## 14. File Layout (planned)
+## 15. File layout
 
 ```
 Si_KingOfTheHill/
-├── DESIGN.md                          (this file)
-├── include/
-│   └── netstandard2.1/                (reference DLLs — copy from Si_CrabCannon/include)
+├── DESIGN.md                          ← this file
+├── include/netstandard2.1/            ← reference DLLs (gitignored)
 └── Si_KingOfTheHill/
     ├── Si_KingOfTheHill.csproj
-    ├── Si_KingOfTheHill.cs            (MelonMod entry, lifecycle)
-    ├── Config.cs                      (JSON model, load/save)
-    ├── Zone.cs                        (cylinder check, unit enumeration, weighting)
-    ├── King.cs                        (ownership state machine, handover)
-    ├── Timer.cs                       (capture countdown, announcements)
-    ├── Patches.cs                     (Harmony: damage immunity, anti-build, win trigger)
-    └── Commands.cs                    (/koh family)
+    ├── Si_KingOfTheHill.cs            ← MelonMod entry, lifecycle, OnUpdate pipeline
+    ├── Config.cs                      ← KohConfig + load/save (auto-save on load)
+    ├── Zone.cs                        ← MapBalance subscription, dump loader, EvaluateScores, player-in-zone tracking
+    ├── King.cs                        ← dominance state machine, accumulation, milestones, colour helpers
+    ├── Timer.cs                       ← periodic status, win trigger, finishing-force delay, sound dispatch
+    ├── Outposts.cs                    ← outpost-clock ring spawn/despawn
+    ├── Patches.cs                     ← 4 damage-immunity Harmony patches + GetTeamsAreEnemy bypass
+    ├── Rewards.cs                     ← credit tracking, kill/structure-kill rewards, zone-presence reward
+    ├── Buy.cs                         ← /buy menu state machine, /1-/N chat hook, purchase + spawn
+    └── Commands.cs                    ← /koh command + Reply/BroadcastAllChat helpers
 ```
+
+---
+
+## 16. Known limitations / future work
+
+- **No anti-build patch yet** — `BuildExclusionRadius` is configured but not enforced in code. A Harmony prefix on `Structure.Construct` would block enemy constructions inside the exclusion radius.
+- **No world-space UI billboard** — capture progress is communicated via chat + outpost clock. A `Canvas WorldSpace` above the KoH would be nicer but requires per-client rendering work.
+- **Outposts above ground on cliffs** — `SampleSurfaceY` uses raycast from terrain+200m, which handles most rocks. Map-specific edge cases may still poke through; bump `OutpostBuryDepth` per map.
+- **Auxiliary units excluded** — units with `unit_cap_value <= 0` (Hover Bike, harvester, etc.) don't contribute to score or rewards. By design.
+- **Credit persistence** — round-scoped only (`RewardResetOnGameEnd = true`). Cross-round persistence would need a save file.
