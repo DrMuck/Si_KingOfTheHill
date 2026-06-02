@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>enable</Nullable>
+    <MSBuildWarningsAsMessages>MSB3270</MSBuildWarningsAsMessages>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="..\include\netstandard2.1\*.dll">
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

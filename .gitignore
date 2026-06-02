@@ -1,0 +1,11 @@
+# C# build artifacts
+Si_KingOfTheHill/bin/
+Si_KingOfTheHill/obj/
+
+# Game DLL references (not redistributable — copy from your Silica server install)
+include/
+
+# IDE
+*.user
+.vs/
+.idea/
