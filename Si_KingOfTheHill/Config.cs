@@ -17,7 +17,10 @@ namespace Si_KingOfTheHill
             // Note: the KoH prefab is owned by Si_MapBalance (its KohEntry.PrefabName field).
             // KGT just consumes the spawned GameObject via MapBalanceSpecials.Koh.
             public float CaptureRadius = 50.0f;
-            public float BuildExclusionRadius = 75.0f;
+            // 0 = use the runtime exclusion radius from MapBalance's per-map KoH entry
+            // (the same value broadcast via kgt_koh_spawn and visualized in MapReplay).
+            // Set > 0 to force a fixed radius regardless of the map's MapBalance config.
+            public float BuildExclusionRadius = 0.0f;
 
             public float EvalIntervalSeconds = 1.0f;
             public float OwnershipHandoverDelay = 3.0f; // small smoothing to avoid edge-of-dominance king flicker

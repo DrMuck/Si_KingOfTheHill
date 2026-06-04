@@ -27,7 +27,9 @@ namespace Si_KingOfTheHill
         static Transform? _kohTower;
         static Vector3 _kohCenter = Vector3.zero;
         static float _captureRadius = 50f;
-        static float _exclusionRadius = 75f;
+        // 0 = MapBalance didn't define an exclusion for this map → AntiBuild
+        // falls back to Cfg.BuildExclusionRadius. >0 = canonical value from MapBalance.
+        static float _exclusionRadius = 0f;
         static bool _hasKoh = false;
 
         // Per-round win threshold. Set from MapBalance.Koh.WinThreshold if non-zero,
@@ -44,7 +46,8 @@ namespace Si_KingOfTheHill
         // DisplayName -> "built_at" (production building name). Empty string for auxiliaries.
         static readonly Dictionary<string, string> _unitToBuilding = new Dictionary<string, string>();
         // Extended dump data (used by reward + /buy system).
-        static readonly Dictionary<string, int> _unitCost = new Dictionary<string, int>();           // DisplayName -> initial cost
+        static readonly Dictionary<string, int> _unitCost = new Dictionary<string, int>();           // DisplayName -> effective cost (vanilla * UnitBalance cost_mult)
+        static readonly Dictionary<string, int> _unitCostVanilla = new Dictionary<string, int>();    // DisplayName -> vanilla cost (from dump; never mutated)
         static readonly Dictionary<string, string> _unitFaction = new Dictionary<string, string>(); // DisplayName -> "Sol"/"Centauri"/"Alien"
         static readonly Dictionary<string, string> _unitPrefab = new Dictionary<string, string>();  // DisplayName -> prefab name (internal minus "ObjectInfo_" prefix)
         static bool _dumpLoaded;
@@ -78,7 +81,9 @@ namespace Si_KingOfTheHill
                     if (string.IsNullOrEmpty(name)) continue;
 
                     _unitToBuilding[name!] = u["built_at"]?.ToString() ?? "";
-                    _unitCost[name!] = u["cost"]?.Value<int>() ?? 0;
+                    int vanillaCost = u["cost"]?.Value<int>() ?? 0;
+                    _unitCostVanilla[name!] = vanillaCost;
+                    _unitCost[name!] = vanillaCost;  // overlay applied in ApplyUnitBalanceCostOverrides
                     _unitFaction[name!] = u["faction"]?.ToString() ?? "";
 
                     // Derive prefab name from "internal" (ObjectInfo asset name).
@@ -99,41 +104,113 @@ namespace Si_KingOfTheHill
         }
 
         /// <summary>
-        /// Refresh _unitCost from live ConstructionData.ResourceCost values.
-        /// Si_UnitBalance applies cost overrides via OverrideManager at game start; those
-        /// land on ConstructionData.ResourceCost, NOT the JSON dump (which is the static
-        /// vanilla snapshot). Call this AFTER overrides are applied so rewards reflect
-        /// actual game-economy costs.
+        /// Rebuild _unitCost from the vanilla dump snapshot + Si_UnitBalance's cost_mult
+        /// overrides. Reading ConstructionData.ResourceCost at runtime returns vanilla
+        /// because OverrideManager applies an overlay rather than mutating prefab fields,
+        /// so we parse Si_UnitBalance_Config.json directly.
+        ///
+        /// Idempotent: always reset _unitCost from _unitCostVanilla before multiplying,
+        /// so calling per round-start can't compound.
         /// </summary>
-        static void RefreshLiveUnitCosts()
+        static void ApplyUnitBalanceCostOverrides()
         {
+            // 1. Ensure we have a vanilla baseline. If the dump didn't populate
+            //    _unitCostVanilla (Si_UnitBalance not installed), seed it from a live
+            //    ConstructionData scan. That read returns vanilla values whether or
+            //    not Si_UnitBalance is loaded (its OverrideManager is a runtime overlay,
+            //    not a field mutation), so it's a safe baseline either way.
+            if (_unitCostVanilla.Count == 0)
+            {
+                int scanned = SeedVanillaCostsFromConstructionData();
+                MelonLogger.Msg($"[KGT] No dump — seeded {scanned} vanilla unit costs from live ConstructionData (fallback)");
+            }
+
+            // 2. Reset _unitCost to vanilla snapshot.
+            foreach (var kv in _unitCostVanilla) _unitCost[kv.Key] = kv.Value;
+
+            string path = Path.Combine("UserData", "UnitBalance_cfg", "Si_UnitBalance_Config.json");
+            if (!File.Exists(path))
+            {
+                MelonLogger.Msg($"[KGT] {path} not found — rewards use vanilla unit costs");
+                return;
+            }
+
+            // 2. Apply cost_mult overrides from UnitBalance config.
+            try
+            {
+                var root = JObject.Parse(File.ReadAllText(path));
+                var unitsToken = root["units"];
+                if (unitsToken == null || unitsToken.Type != JTokenType.Object)
+                {
+                    MelonLogger.Warning("[KGT] Si_UnitBalance_Config.json: 'units' object missing");
+                    return;
+                }
+
+                int touched = 0, skipped = 0;
+                foreach (var prop in unitsToken.Children<JProperty>())
+                {
+                    string unitName = prop.Name;
+                    // Skip pseudo-keys: _teleport, _comment_*, etc.
+                    if (string.IsNullOrEmpty(unitName) || unitName[0] == '_') continue;
+                    var u = prop.Value;
+                    if (u == null || u.Type != JTokenType.Object) continue;
+
+                    var mt = u["cost_mult"];
+                    if (mt == null) continue;
+                    float mult = mt.Value<float>();
+                    if (mult <= 0f) continue;
+
+                    if (!_unitCostVanilla.TryGetValue(unitName, out int vanilla) || vanilla <= 0)
+                    {
+                        skipped++;  // UnitBalance has this unit but our dump doesn't
+                        continue;
+                    }
+
+                    int modded = (int)Math.Round(vanilla * mult);
+                    if (modded != vanilla)
+                    {
+                        _unitCost[unitName] = modded;
+                        touched++;
+                    }
+                }
+                MelonLogger.Msg($"[KGT] Applied cost_mult overrides from Si_UnitBalance_Config.json: {touched} units changed, {skipped} not in dump");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[KGT] ApplyUnitBalanceCostOverrides failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Last-resort fallback when Si_UnitBalance_Dump.json is absent (e.g. the server
+        /// runs KGT without Si_UnitBalance installed). Walks every loaded ConstructionData
+        /// and pulls DisplayName + ResourceCost into _unitCostVanilla. The values are
+        /// vanilla because OverrideManager doesn't mutate prefab fields, which is exactly
+        /// what we want as a baseline. Returns the number of entries written.
+        /// </summary>
+        static int SeedVanillaCostsFromConstructionData()
+        {
+            int n = 0;
             try
             {
                 var allCD = Resources.FindObjectsOfTypeAll<ConstructionData>();
-                int updated = 0, additions = 0;
                 foreach (var cd in allCD)
                 {
                     if (cd == null || cd.ObjectInfo == null) continue;
                     string name = cd.ObjectInfo.DisplayName;
                     if (string.IsNullOrEmpty(name)) continue;
-                    int live = cd.ResourceCost;
-                    if (live <= 0) continue;
-                    if (_unitCost.TryGetValue(name, out int prev))
-                    {
-                        if (prev != live) { _unitCost[name] = live; updated++; }
-                    }
-                    else
-                    {
-                        _unitCost[name] = live; additions++;
-                    }
+                    int cost = cd.ResourceCost;
+                    if (cost <= 0) continue;
+                    if (_unitCostVanilla.ContainsKey(name)) continue;
+                    _unitCostVanilla[name] = cost;
+                    n++;
                 }
-                if (updated + additions > 0)
-                    MelonLogger.Msg($"[KGT] Refreshed live unit costs from ConstructionData: {updated} updated, {additions} added");
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning($"[KGT] RefreshLiveUnitCosts failed: {ex.Message}");
+                MelonLogger.Warning($"[KGT] SeedVanillaCostsFromConstructionData failed: {ex.Message}");
             }
+            return n;
         }
 
         // ----- MapBalance subscription -----
@@ -191,7 +268,10 @@ namespace Si_KingOfTheHill
                 if (obj == null) { MelonLogger.Warning("[KGT] MapBalance KoH.Obj is null"); return; }
 
                 _captureRadius = (float)(kohType.GetField("CaptureRadius")?.GetValue(koh) ?? 50f);
-                _exclusionRadius = (float)(kohType.GetField("ExclusionRadius")?.GetValue(koh) ?? 75f);
+                // 0 = unset by MapBalance (per-map config has no exclusion). AntiBuild
+                // then falls back to Cfg.BuildExclusionRadius. Don't apply a hard-coded
+                // 75 m default here — it silently shadowed the real per-map value.
+                _exclusionRadius = (float)(kohType.GetField("ExclusionRadius")?.GetValue(koh) ?? 0f);
 
                 // Resolve win threshold from our own config (per-map override > global default).
                 // Map name = the active Unity scene name (matches what Si_MapBalance also uses).

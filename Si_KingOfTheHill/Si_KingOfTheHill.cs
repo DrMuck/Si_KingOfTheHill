@@ -103,9 +103,11 @@ namespace Si_KingOfTheHill
             // Load the Si_UnitBalance dump on the first game start so unit classification
             // is ready for scoring. Single-shot — guarded inside LoadUnitDump.
             LoadUnitDump();
-            // Refresh costs from live ConstructionData (post-Si_UnitBalance overrides) so
-            // kill rewards use the actual modded economy, not the vanilla dump snapshot.
-            RefreshLiveUnitCosts();
+            // Apply Si_UnitBalance's cost_mult overrides on top of the vanilla dump snapshot.
+            // Reading ConstructionData.ResourceCost would return vanilla (OM is a runtime
+            // overlay, not a field mutation), so we parse Si_UnitBalance_Config.json instead.
+            // Re-applied each round start so live config edits take effect on next round.
+            ApplyUnitBalanceCostOverrides();
 
             // Arm the startup-grace check (handled in OnUpdate).
             _startupCheckTimer = STARTUP_CHECK_DELAY;

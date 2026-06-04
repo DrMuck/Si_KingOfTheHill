@@ -48,13 +48,14 @@ namespace Si_KingOfTheHill
                 var team = args.ParentStructure.Team;
                 if (team == null) return;
 
-                // Active exclusion radius: prefer the runtime MapBalance value (this is
-                // what's broadcast to players via the kgt_koh_spawn log line and what
-                // the visible zone represents). Cfg.BuildExclusionRadius is an
-                // optional manual override (set > 0 in config to force).
-                float exclusion = (Cfg.BuildExclusionRadius > 0f)
-                    ? Cfg.BuildExclusionRadius
-                    : _exclusionRadius;
+                // Active exclusion radius:
+                //   - If MapBalance's per-map KoH entry defines ExclusionRadius (> 0),
+                //     use that. This is the canonical source, broadcast via
+                //     kgt_koh_spawn and visualized in MapReplay.
+                //   - Only when the active spawn config has no exclusion (==0) do we
+                //     fall back to Cfg.BuildExclusionRadius.
+                // This guarantees the default never silently shrinks the visible zone.
+                float exclusion = (_exclusionRadius > 0f) ? _exclusionRadius : Cfg.BuildExclusionRadius;
                 if (exclusion <= 0f) return;
 
                 // Current king can build inside their hill (defender's advantage).
