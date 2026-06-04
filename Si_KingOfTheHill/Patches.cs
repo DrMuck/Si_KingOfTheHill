@@ -111,19 +111,23 @@ namespace Si_KingOfTheHill
                     MelonLogger.Warning("[KGT] DamageManager.SetHealth01(float) not found");
                 }
 
-                // Also patch OnReceiveClientDamageHitPacket — this is the CRITICAL path
-                // for player-controlled-unit damage. Client computes damage locally and
-                // sends a packet; server applies it directly via Health -= value, BYPASSING
-                // ApplyDamage. Without this patch, player weapons damage the KoH.
+                // Also patch OnReceiveClientDamageHitPacket — the CRITICAL path for
+                // player-controlled-unit damage. Client computes damage locally and sends a
+                // packet; server applies via Health -= value (bypasses ApplyDamage).
+                //
+                // Per databomb: a plain Prefix returning false would leave the packet stream
+                // un-consumed, corrupting subsequent reads. So we transpile: skip just the
+                // "Health -= value; OnDamageReceived(...)" instructions when target is KoH,
+                // letting all packetReader reads above them run normally.
                 var clientHitMethod = _damageManagerType.GetMethod("OnReceiveClientDamageHitPacket",
                     BindingFlags.Public | BindingFlags.Instance);
                 if (clientHitMethod != null)
                 {
-                    var prefix = typeof(KingOfTheHill).GetMethod(
-                        nameof(Prefix_OnReceiveClientDamageHitPacket),
+                    var transpiler = typeof(KingOfTheHill).GetMethod(
+                        nameof(Transpile_OnReceiveClientDamageHitPacket),
                         BindingFlags.Static | BindingFlags.NonPublic);
-                    harmony.Patch(clientHitMethod, prefix: new HarmonyMethod(prefix));
-                    MelonLogger.Msg("[KGT] Patched DamageManager.OnReceiveClientDamageHitPacket");
+                    harmony.Patch(clientHitMethod, transpiler: new HarmonyMethod(transpiler));
+                    MelonLogger.Msg("[KGT] Transpiled DamageManager.OnReceiveClientDamageHitPacket");
                 }
                 else
                 {
@@ -342,21 +346,19 @@ namespace Si_KingOfTheHill
         }
 
         /// <summary>
-        /// Harmony prefix on DamageManager.OnReceiveClientDamageHitPacket. This is the
-        /// path player-controlled unit weapons take: client computes damage, sends packet,
-        /// server applies via Health -= value (bypassing ApplyDamage).
-        /// Skip the entire method when the target is the KoH building.
+        /// Called from the OnReceiveClientDamageHitPacket transpiler. Returns true if the
+        /// given DamageManager's hierarchy contains the cached KoH GameObject — i.e.
+        /// the damage should be skipped. Cheap: parent-chain walk.
+        /// MUST be public so the patched IL can call it (Harmony emits `call` to this).
         /// </summary>
-        static int _clientHitBlockLog = 0;
-        static bool Prefix_OnReceiveClientDamageHitPacket(object __instance)
+        public static bool IsKohDamageManager(object dm)
         {
             try
             {
-                if (!_hasKoh || _kohTower == null) return true;
-                var comp = __instance as Component;
-                if (comp == null) return true;
+                if (!_hasKoh || _kohTower == null) return false;
+                var comp = dm as Component;
+                if (comp == null) return false;
                 var kohGo = _kohTower.gameObject;
-
                 Transform? t = comp.transform;
                 while (t != null)
                 {
@@ -365,15 +367,148 @@ namespace Si_KingOfTheHill
                         if (_clientHitBlockLog < DAMAGE_DIAG_LIMIT)
                         {
                             _clientHitBlockLog++;
-                            MelonLogger.Msg($"[KoH/DBG] OnReceiveClientDamageHitPacket BLOCKED #{_clientHitBlockLog} (player-fired damage to KoH zeroed)");
+                            MelonLogger.Msg($"[KoH/DBG] OnReceiveClientDamageHitPacket: KoH damage skipped (block #{_clientHitBlockLog})");
                         }
-                        return false; // skip original — player damage to KoH denied
+                        return true;
                     }
                     t = t.parent;
                 }
+                return false;
             }
-            catch (Exception) { }
-            return true;
+            catch (Exception) { return false; }
+        }
+        static int _clientHitBlockLog = 0;
+
+        /// <summary>
+        /// Harmony transpiler for DamageManager.OnReceiveClientDamageHitPacket.
+        /// Inserts an early-out before the "Health -= value; OnDamageReceived(...)" block
+        /// when the target's DamageManager belongs to the KoH building.
+        ///
+        /// Strategy (decompiled body, key tail lines):
+        ///   value = Mathf.Clamp(value, 0f, Health);
+        ///   if (!(value &lt;= 0f) &amp;&amp; !DamageDisabled &amp;&amp; ... &amp;&amp; !(Health &lt;= 0f))
+        ///   {
+        ///       Health -= value;                                  // ← skip from here
+        ///       OnDamageReceived(value, instigator, hitAng);      // ← ...to here
+        ///   }                                                     // ← branch target
+        ///
+        /// We find the call to OnDamageReceived, label the instruction AFTER it,
+        /// then find the Health-decrement preamble (`ldarg.0 ldarg.0 ldfld Health`)
+        /// and inject:
+        ///       ldarg.0
+        ///       call IsKohDamageManager
+        ///       brtrue postOnDamageReceived
+        /// </summary>
+        static System.Collections.Generic.IEnumerable<CodeInstruction> Transpile_OnReceiveClientDamageHitPacket(
+            System.Collections.Generic.IEnumerable<CodeInstruction> instructions,
+            System.Reflection.Emit.ILGenerator generator)
+        {
+            var codes = new System.Collections.Generic.List<CodeInstruction>(instructions);
+            FieldInfo? healthField = _damageManagerType?.GetField("Health",
+                BindingFlags.Public | BindingFlags.Instance);
+            MethodInfo? onDmgRecv = _damageManagerType?.GetMethod("OnDamageReceived",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+            if (healthField == null || onDmgRecv == null)
+            {
+                MelonLogger.Warning("[KGT] Transpile_OnReceive: Health field or OnDamageReceived not found — passing through original IL");
+                return codes;
+            }
+
+            // 1) Find the call to OnDamageReceived.
+            int onDmgIdx = -1;
+            for (int i = 0; i < codes.Count; i++)
+            {
+                var c = codes[i];
+                if ((c.opcode == System.Reflection.Emit.OpCodes.Call || c.opcode == System.Reflection.Emit.OpCodes.Callvirt)
+                    && c.operand is MethodInfo m && m == onDmgRecv)
+                {
+                    onDmgIdx = i;
+                    break;
+                }
+            }
+            if (onDmgIdx < 0 || onDmgIdx + 1 >= codes.Count)
+            {
+                MelonLogger.Warning("[KGT] Transpile_OnReceive: OnDamageReceived call site not found — passing through");
+                return codes;
+            }
+
+            // 2) The instruction immediately AFTER OnDamageReceived is the branch target.
+            int postIdx = onDmgIdx + 1;
+            var postLabel = generator.DefineLabel();
+            codes[postIdx].labels.Add(postLabel);
+
+            // 3) Walk backwards from onDmgIdx to find the `stfld Health` (the Health -= value line).
+            //    Then continue backwards to find the preceding `ldarg.0 ldarg.0 ldfld Health` triple
+            //    which is where the Health-decrement expression begins.
+            int stfldHealthIdx = -1;
+            for (int i = onDmgIdx - 1; i >= 0; i--)
+            {
+                if (codes[i].opcode == System.Reflection.Emit.OpCodes.Stfld
+                    && codes[i].operand is FieldInfo fi && fi == healthField)
+                {
+                    stfldHealthIdx = i;
+                    break;
+                }
+            }
+            if (stfldHealthIdx < 0)
+            {
+                MelonLogger.Warning("[KGT] Transpile_OnReceive: stfld Health not found before OnDamageReceived — passing through");
+                return codes;
+            }
+
+            // The "Health -= value" expression in IL looks like:
+            //   ldarg.0          (idx blockStart)
+            //   ldarg.0
+            //   ldfld Health
+            //   ldloc value
+            //   sub
+            //   stfld Health     (idx stfldHealthIdx)
+            // We want to insert our check BEFORE blockStart.
+            int blockStart = -1;
+            for (int i = stfldHealthIdx - 1; i >= System.Math.Max(0, stfldHealthIdx - 8); i--)
+            {
+                // Look for the pattern: [i] = ldarg.0, [i+1] = ldarg.0, [i+2] = ldfld Health
+                if (i + 2 < codes.Count
+                    && codes[i].opcode == System.Reflection.Emit.OpCodes.Ldarg_0
+                    && codes[i + 1].opcode == System.Reflection.Emit.OpCodes.Ldarg_0
+                    && codes[i + 2].opcode == System.Reflection.Emit.OpCodes.Ldfld
+                    && codes[i + 2].operand is FieldInfo f2 && f2 == healthField)
+                {
+                    blockStart = i;
+                    break;
+                }
+            }
+            if (blockStart < 0)
+            {
+                MelonLogger.Warning("[KGT] Transpile_OnReceive: ldarg.0 ldarg.0 ldfld Health preamble not found — passing through");
+                return codes;
+            }
+
+            // 4) Build our injected check:
+            //      ldarg.0
+            //      call IsKohDamageManager
+            //      brtrue postLabel
+            var isKoh = AccessTools.Method(typeof(KingOfTheHill), nameof(IsKohDamageManager));
+            var injected = new System.Collections.Generic.List<CodeInstruction>
+            {
+                new CodeInstruction(System.Reflection.Emit.OpCodes.Ldarg_0),
+                new CodeInstruction(System.Reflection.Emit.OpCodes.Call, isKoh),
+                new CodeInstruction(System.Reflection.Emit.OpCodes.Brtrue, postLabel),
+            };
+
+            // 5) Splice in.  If the original blockStart had any labels (from earlier branches
+            //    targeting it), move them to the FIRST injected instruction so those branches
+            //    still hit the right entry point.
+            if (codes[blockStart].labels.Count > 0)
+            {
+                injected[0].labels.AddRange(codes[blockStart].labels);
+                codes[blockStart].labels.Clear();
+            }
+            codes.InsertRange(blockStart, injected);
+
+            MelonLogger.Msg("[KGT] Transpiled OnReceiveClientDamageHitPacket — KoH skip-branch injected before Health decrement");
+            return codes;
         }
 
         static string BuildHierarchyChain(Transform leaf)

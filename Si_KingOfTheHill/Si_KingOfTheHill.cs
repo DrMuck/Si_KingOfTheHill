@@ -70,6 +70,9 @@ namespace Si_KingOfTheHill
             // Try to subscribe to Si_MapBalance now; if it loaded after us, we'll retry on first
             // game start. Subscription is the channel by which we learn the per-map KoH position.
             TrySubscribeMapBalance();
+
+            // Anti-build via SilicaAdminMod.Event_Construction.OnRequestBuildStructure.
+            HookAntiBuild();
         }
 
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
@@ -170,6 +173,7 @@ namespace Si_KingOfTheHill
             {
                 var scores = EvaluateScores();
                 UpdateOwnership(scores, dt);
+                GrantCommanderRewards(scores, dt);
                 TickTimer(dt);
                 ProcessPlayerNotifications();
             }

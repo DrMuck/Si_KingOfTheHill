@@ -161,6 +161,48 @@ namespace Si_KingOfTheHill
             }
         }
 
+        // ----- Commander faction reward (called per-tick from OnUpdate, per team in zone) -----
+        //
+        // Mirrors the capture-progress cap: a team's effective per-tick contribution
+        // is min(team_score, MaxCapturePointsPerSecond * dt). Reward = effective *
+        // CommanderRewardMultiplier, rounded. Credited to the team treasury via
+        // Team.StoreResource; any overflow (storage full) goes to Team.StartingResources
+        // so the budget rises even with full silos.
+        static void GrantCommanderRewards(Dictionary<Team, float> scores, float deltaSeconds)
+        {
+            try
+            {
+                if (!Cfg.Enabled || !Cfg.CommanderRewardEnabled) return;
+                if (Cfg.CommanderRewardMultiplier <= 0f) return;
+                if (scores == null || scores.Count == 0) return;
+
+                float capPerTick = Cfg.MaxCapturePointsPerSecond * deltaSeconds;
+                if (capPerTick <= 0f) return;
+
+                foreach (var kvp in scores)
+                {
+                    var team = kvp.Key;
+                    if (team == null) continue;
+                    if (IsGamemasterTeam(team)) continue;
+
+                    float effective = Mathf.Min(kvp.Value, capPerTick);
+                    int reward = Mathf.RoundToInt(effective * Cfg.CommanderRewardMultiplier);
+                    if (reward <= 0) continue;
+
+                    int leftover = team.StoreResource(reward);
+                    if (leftover > 0)
+                    {
+                        try { team.StartingResources = team.StartingResources + leftover; }
+                        catch { /* setter fires RPC sync — swallow if context not ready */ }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[KGT] GrantCommanderRewards threw: {ex.Message}");
+            }
+        }
+
         // ----- Zone-presence reward (called from Zone.EvaluateScores per controlled-unit-in-zone) -----
 
         static void GrantZonePresenceReward(Player player, int unitCap, string unitName)

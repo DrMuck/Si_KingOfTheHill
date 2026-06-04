@@ -30,6 +30,12 @@ namespace Si_KingOfTheHill
         const string OUTPOST_PREFAB_NAME = "Outpost";
 
         static readonly List<GameObject> _outposts = new List<GameObject>();
+        // Parallel arrays (index-aligned with _outposts) holding the team-shortname
+        // and world position of each spawned outpost. Used to emit MapReplay
+        // structure_kill events on despawn (we can't read the GameObject's
+        // transform after Destroy).
+        static readonly List<string> _outpostTeamNames = new List<string>();
+        static readonly List<Vector3> _outpostPositions = new List<Vector3>();
         static Team? _outpostKingTeam;           // current king team painted on ring (null = all neutral)
         static int _outpostKingCount;            // 0..Cfg.OutpostCount
         static Team? _neutralTeam;               // cached KoH building's team (Wildlife by default)
@@ -89,13 +95,21 @@ namespace Si_KingOfTheHill
 
                 try
                 {
+                    var spawnPos = new Vector3(x, y, z);
                     var go = Game.SpawnPrefab(prefab, null, teamForThis,
-                                              new Vector3(x, y, z),
+                                              spawnPos,
                                               Quaternion.identity, true, true);
                     if (go != null)
                     {
                         _outposts.Add(go);
+                        string teamShort = ReplayTeamTag(teamForThis);
+                        _outpostTeamNames.Add(teamShort);
+                        _outpostPositions.Add(spawnPos);
                         if (i < kingN) spawnedKing++; else spawnedNeutral++;
+                        // MapReplay: emit a construction_complete so the buildings dict
+                        // gains this outpost under (team, "Outpost", x, z) and the renderer
+                        // picks up the team colour at the ring slot.
+                        LogReplayConstructionComplete(teamShort, "Outpost", spawnPos);
                     }
                 }
                 catch (Exception ex)
@@ -127,8 +141,16 @@ namespace Si_KingOfTheHill
         static void DespawnOutposts()
         {
             int count = _outposts.Count;
-            foreach (var go in _outposts)
+            for (int i = 0; i < _outposts.Count; i++)
             {
+                var go = _outposts[i];
+                // Emit MapReplay structure_kill for THIS slot (whether or not the GO
+                // is still alive) so the buildings dict marks destroy_t. The cached
+                // _outpostPositions/_outpostTeamNames are index-aligned with _outposts.
+                if (i < _outpostPositions.Count && i < _outpostTeamNames.Count)
+                {
+                    LogReplayStructureKill("Outpost", _outpostTeamNames[i], _outpostPositions[i]);
+                }
                 if (go == null) continue;
                 try
                 {
@@ -143,6 +165,8 @@ namespace Si_KingOfTheHill
             }
             if (count > 0) MelonLogger.Msg($"[KGT] Despawned {count} outpost(s).");
             _outposts.Clear();
+            _outpostTeamNames.Clear();
+            _outpostPositions.Clear();
             _outpostKingTeam = null;
             _outpostKingCount = 0;
         }
@@ -155,6 +179,34 @@ namespace Si_KingOfTheHill
                 return terrain.SampleHeight(new Vector3(x, 0f, z)) + terrain.transform.position.y;
             }
             catch { return 0f; }
+        }
+
+        /// <summary>
+        /// Surface Y at (x, z) suitable for spawning a vehicle/unit near an existing
+        /// anchor (the buyer's controlled unit). The generic SampleSurfaceY raycasts
+        /// from terrain+200m down 400m and accepts ANY collider, so a Bomber / mid-air
+        /// projectile crossing the spawn ray returns a 150-200m "ground" — the spawn
+        /// drops from the sky and explodes. We bound the ray to ±50m around the anchor
+        /// so only nearby static surfaces (terrain, structure floors next to the player)
+        /// can be picked. Falls back to terrain Y, then anchor Y, then 0.
+        /// </summary>
+        static float SampleSurfaceY_NearAnchor(Terrain terrain, float x, float z, float anchorY)
+        {
+            float rayStart = anchorY + 10f;
+            try
+            {
+                if (Physics.Raycast(new Vector3(x, rayStart, z), Vector3.down,
+                                    out RaycastHit hit, 60f, ~0, QueryTriggerInteraction.Ignore))
+                {
+                    return hit.point.y;
+                }
+            }
+            catch { }
+            float terrainY = SampleTerrainYLocal(terrain, x, z);
+            // If terrain sample is wildly off vs anchor (e.g. tank on a building roof),
+            // prefer the anchor — never let the caller spawn far above the ground.
+            if (Mathf.Abs(terrainY - anchorY) > 50f) return anchorY;
+            return terrainY;
         }
 
         /// <summary>

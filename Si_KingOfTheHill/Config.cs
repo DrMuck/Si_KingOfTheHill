@@ -63,6 +63,16 @@ namespace Si_KingOfTheHill
             public float BuySpawnDistance = 15.0f;                   // metres in front of player to place purchased unit
             public float BuyMinDistanceFromEnemyCritical = 400.0f;   // refuse purchase if spawn would land within this radius of any enemy HQ/Nest/Queen (0 = disabled)
 
+            // === Commander reward (per-tick, capped by MaxCapturePointsPerSecond) ===
+            // Each tick, every team with units in the zone earns resources for its
+            // faction treasury (helping the commander). Cap rule mirrors capture
+            // progress: a team's effective per-tick contribution is
+            // min(team_score_in_zone, MaxCapturePointsPerSecond * EvalIntervalSeconds).
+            // Reward = effective * CommanderRewardMultiplier (rounded), credited via
+            // Team.StoreResource (overflow → Team.StartingResources).
+            public bool  CommanderRewardEnabled    = true;
+            public float CommanderRewardMultiplier = 1.0f;
+
             // === Sound files (relative to server cwd; "sounds/x.wav" → UserData/sounds/x.wav) ===
             // British TTS clips generated via edge-tts. Set any to "" to disable that one.
             public string SoundFirstCapture = "sounds/first_capture.wav";

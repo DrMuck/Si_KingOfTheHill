@@ -35,6 +35,8 @@
   "RewardResetOnGameEnd": true,
   "BuySpawnDistance": 15.0,
   "BuyMinDistanceFromEnemyCritical": 400.0,
+  "CommanderRewardEnabled": true,
+  "CommanderRewardMultiplier": 1.0,
   "SoundFirstCapture": "sounds/first_capture.wav",
   "SoundMilestone25": "sounds/milestone_25.wav",
   "SoundMilestone50": "sounds/milestone_50.wav",

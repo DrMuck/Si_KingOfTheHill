@@ -208,6 +208,12 @@ namespace Si_KingOfTheHill
             if (!_milestonesPlayedCumulative.Add(percent)) return; // already fired this round
             BroadcastMilestoneChat(king, percent);
             PlaySound(sound);
+            // MapReplay event.
+            LogToReplay("kgt_progress",
+                ("team", ReplayTeamTag(king)),
+                ("pct", percent.ToString()),
+                ("accumulated", now.ToString("F0")),
+                ("threshold", threshold.ToString("F0")));
         }
 
         static void BroadcastMilestoneChat(Team king, int percent)
@@ -243,6 +249,12 @@ namespace Si_KingOfTheHill
             // progress fraction (cumulative mode: king inherits prior progress).
             float frac = _winThreshold > 0f ? GetCurrentProgress(newKing) / _winThreshold : 0f;
             UpdateOutpostClock(newKing, frac);
+
+            // MapReplay event.
+            LogToReplay("kgt_king_change",
+                ("team", ReplayTeamTag(newKing)),
+                ("previous_team", old == null ? "none" : ReplayTeamTag(old)),
+                ("progress_pct", (frac * 100f).ToString("F0")));
         }
 
         static void CheckMilestones(Team king, float prev, float now)

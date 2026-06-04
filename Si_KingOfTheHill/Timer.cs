@@ -103,6 +103,8 @@ namespace Si_KingOfTheHill
             BroadcastAllChat($"[KGT] {GetWinMessageForTeam(winner, name)}");
             PlaySound(GetWinSoundForTeam(winner));
             MelonLogger.Msg($"[KGT] WIN: {name}. Voice line playing; cannon + finishing force in {Cfg.WinFinishingForceDelaySeconds}s.");
+            // MapReplay event.
+            LogToReplay("kgt_win", ("winner", ReplayTeamTag(winner)));
 
             // Defer cannon + finishing force so they don't overlap the voice line.
             _winFinishingDelayTimer = Mathf.Max(0f, Cfg.WinFinishingForceDelaySeconds);
@@ -180,7 +182,7 @@ namespace Si_KingOfTheHill
         const string PREFAB_GOLIATH      = "Goliath";
         const string PREFAB_SIEGE_TANK   = "Sol_UltraHeavy_SiegeTank";
         const string PREFAB_CRIMSON_TANK = "Cent_UltraHeavy_CrimsonTank";
-        const float  FORCE_RING_RADIUS   = 40f;   // tanks at this distance from HQ
+        const float  FORCE_RING_RADIUS   = 90f;   // tanks at this distance from HQ
         const float  GOLIATH_DROP_HEIGHT = 80f;   // Goliaths spawn this far above HQ; gravity does the rest
 
         static void SpawnFinishingForce(Team winner)

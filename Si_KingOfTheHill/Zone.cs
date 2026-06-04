@@ -212,6 +212,20 @@ namespace Si_KingOfTheHill
                                 $"R_capture={_captureRadius} R_excl={_exclusionRadius} " +
                                 $"win_threshold={_winThreshold:F0} ({(perMap ? "per-map override for " + mapName : "global default")})");
 
+                // MapReplay: emit KoH spawn + ring metadata so the replay viewer can render.
+                LogToReplay("kgt_koh_spawn",
+                    ("x", _kohCenter.x.ToString("F0")),
+                    ("z", _kohCenter.z.ToString("F0")),
+                    ("capture_radius", _captureRadius.ToString("F0")),
+                    ("exclusion_radius", _exclusionRadius.ToString("F0")),
+                    ("win_threshold", _winThreshold.ToString("F0")));
+                LogToReplay("kgt_outpost_ring",
+                    ("center_x", _kohCenter.x.ToString("F0")),
+                    ("center_z", _kohCenter.z.ToString("F0")),
+                    ("radius", _captureRadius.ToString("F0")),
+                    ("count", Cfg.OutpostCount.ToString()),
+                    ("bury_depth", Cfg.OutpostBuryDepth.ToString("F0")));
+
                 // Spawn the initial buried-outpost ring — 0 king, all neutral.
                 // Subsequent ticks call UpdateOutpostClock to fill as progress grows.
                 SpawnOutpostsSplit(null, 0);

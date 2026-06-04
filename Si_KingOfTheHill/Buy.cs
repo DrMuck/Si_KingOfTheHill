@@ -308,11 +308,15 @@ namespace Si_KingOfTheHill
             }
 
             // Spawn position: BuySpawnDistance metres in front of player's facing.
+            // Use SampleSurfaceY_NearAnchor (not the generic SampleSurfaceY which casts
+            // from terrain+200m and accepts any collider hit) to avoid the spawn-in-sky
+            // bug where a flying unit / projectile between sky and ground was being
+            // returned as the surface.
             Vector3 origin = controlled.transform.position;
             Vector3 fwd = controlled.transform.forward;
             float dist = Mathf.Max(2f, Cfg.BuySpawnDistance);
             Vector3 xz = origin + fwd * dist;
-            float groundY = SampleSurfaceY(Terrain.activeTerrain, xz.x, xz.z) + 2f;
+            float groundY = SampleSurfaceY_NearAnchor(Terrain.activeTerrain, xz.x, xz.z, origin.y) + 2f;
             Vector3 pos = new Vector3(xz.x, groundY, xz.z);
 
             // Anti-rush: refuse purchase if the spawn would land too close to ANY enemy critical
