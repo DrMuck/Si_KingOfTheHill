@@ -31,6 +31,15 @@ namespace Si_KingOfTheHill
         // falls back to Cfg.BuildExclusionRadius. >0 = canonical value from MapBalance.
         static float _exclusionRadius = 0f;
         static bool _hasKoh = false;
+        // Cached for auto-respawn when a player kills the KoH despite our immunity
+        // patches. _kohCenter (Vector3) is the canonical reference for capture and
+        // outpost logic — the GameObject is now cosmetic.
+        static GameObject? _kohPrefabRef;
+        static Team? _kohTeam;
+        static Quaternion _kohRotation = Quaternion.identity;
+        static float _kohAliveCheckTimer = 0f;
+        static int _kohRespawnCount = 0;
+        const float KOH_ALIVE_CHECK_INTERVAL = 3.0f;
 
         // Per-round win threshold. Set from MapBalance.Koh.WinThreshold if non-zero,
         // otherwise falls back to Cfg.WinThreshold. Use this everywhere instead of Cfg.WinThreshold.
@@ -75,10 +84,17 @@ namespace Si_KingOfTheHill
                 // Iterate JToken directly — casting to JArray trips the netstandard2.1 /
                 // net472 Newtonsoft.Json type resolution (ICloneable / IBindingList interfaces).
                 int count = 0;
+                int skippedStructures = 0;
                 foreach (var u in unitsToken)
                 {
                     string? name = u["name"]?.ToString();
                     if (string.IsNullOrEmpty(name)) continue;
+
+                    // Skip structures — they appear in the dump alongside units (e.g.
+                    // "Air Factory" with built_at="Headquarters") and would otherwise
+                    // pollute the /buy menu's category list with non-unit options.
+                    bool isStructure = u["is_structure"]?.Value<bool>() ?? false;
+                    if (isStructure) { skippedStructures++; continue; }
 
                     _unitToBuilding[name!] = u["built_at"]?.ToString() ?? "";
                     int vanillaCost = u["cost"]?.Value<int>() ?? 0;
@@ -87,15 +103,23 @@ namespace Si_KingOfTheHill
                     _unitFaction[name!] = u["faction"]?.ToString() ?? "";
 
                     // Derive prefab name from "internal" (ObjectInfo asset name).
-                    // e.g. "ObjectInfo_Sol_Soldier_Heavy" -> "Sol_Soldier_Heavy"
+                    //   Sol_Soldier_Heavy  → game DB key "Sol_Soldier_Heavy"      (humans keep prefix)
+                    //   Alien_Scorpion     → game DB key "Scorpion"               (aliens DROP prefix)
+                    // Alien creature prefabs are registered in GameDatabase without
+                    // the "Alien_" faction prefix (confirmed by Timer.cs finishing-force
+                    // constants like PREFAB_GOLIATH = "Goliath"). Without this strip,
+                    // /buy fails on every alien purchase with "Prefab 'Alien_X' not in
+                    // spawnable database".
                     string internalName = u["internal"]?.ToString() ?? "";
                     if (internalName.StartsWith("ObjectInfo_"))
                         internalName = internalName.Substring("ObjectInfo_".Length);
+                    if (internalName.StartsWith("Alien_"))
+                        internalName = internalName.Substring("Alien_".Length);
                     _unitPrefab[name!] = internalName;
 
                     count++;
                 }
-                MelonLogger.Msg($"[KGT] Loaded {count} units from dump (name → built_at/cost/faction/prefab)");
+                MelonLogger.Msg($"[KGT] Loaded {count} units from dump ({skippedStructures} structures skipped)");
             }
             catch (Exception ex)
             {
@@ -213,6 +237,67 @@ namespace Si_KingOfTheHill
             return n;
         }
 
+        /// <summary>
+        /// Called every OnUpdate tick. Periodically (KOH_ALIVE_CHECK_INTERVAL) checks
+        /// whether the KoH GameObject is still alive; if a player managed to destroy
+        /// it despite our damage-immunity patches, spawn a fresh copy at _kohCenter.
+        ///
+        /// Capture state (King.cs accumulator, zone scoring, outpost ring) is keyed
+        /// off the Vector3 _kohCenter, NOT _kohTower — so it survives destruction
+        /// regardless. Auto-respawn just restores the visible building.
+        /// </summary>
+        static void TickKohAliveCheck(float dt)
+        {
+            if (!_hasKoh) return;
+            _kohAliveCheckTimer -= dt;
+            if (_kohAliveCheckTimer > 0f) return;
+            _kohAliveCheckTimer = KOH_ALIVE_CHECK_INTERVAL;
+
+            // Unity's overloaded == operator treats destroyed Objects as null.
+            bool isDestroyed = (_kohTower == null) || (_kohTower.gameObject == null);
+            if (!isDestroyed && _kohTower != null)
+            {
+                try
+                {
+                    var dm = _kohTower.gameObject.GetComponent<DamageManager>();
+                    if (dm != null && dm.IsDestroyed) isDestroyed = true;
+                }
+                catch { }
+            }
+            if (!isDestroyed) return;
+
+            // Can't respawn without the cached prefab/team — give up gracefully.
+            if (_kohPrefabRef == null || _kohTeam == null)
+            {
+                if (_kohRespawnCount == 0)  // log once
+                {
+                    MelonLogger.Warning("[KGT] KoH destroyed but cache is empty — cannot auto-respawn. Capture continues by position.");
+                    _kohRespawnCount = -1;  // flag so we don't spam this warning
+                }
+                return;
+            }
+
+            try
+            {
+                var newObj = Game.SpawnPrefab(_kohPrefabRef, null, _kohTeam, _kohCenter, _kohRotation, true, true);
+                if (newObj != null)
+                {
+                    _kohTower = newObj.transform;
+                    _kohRespawnCount = Mathf.Max(0, _kohRespawnCount) + 1;
+                    MelonLogger.Msg($"[KGT] KoH auto-respawned at ({_kohCenter.x:F0},{_kohCenter.z:F0}) — respawn #{_kohRespawnCount}");
+                    BroadcastAllChat("[KGT] <color=#39ff14>The Galactic Teleporter has rebuilt itself.</color>");
+                }
+                else
+                {
+                    MelonLogger.Warning("[KGT] KoH respawn returned null GameObject");
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[KGT] KoH respawn threw: {ex.Message}");
+            }
+        }
+
         // ----- MapBalance subscription -----
 
         static bool TrySubscribeMapBalance()
@@ -255,6 +340,16 @@ namespace Si_KingOfTheHill
         {
             try
             {
+                // Mode 2 (BuyOnly) / Mode 3 (Disabled): ignore the MapBalance KoH
+                // payload entirely — don't claim the building, don't spawn the outpost
+                // ring, don't arm the watchdog. If MapBalance still picked a koh layout
+                // the building just sits there as a neutral structure with no KGT logic
+                // attached.
+                if (!ModeKohActive)
+                {
+                    MelonLogger.Msg($"[KGT] OnMapBalanceSpecialsReady ignored — Mode={Cfg.Mode} (KoH gameplay disabled)");
+                    return;
+                }
                 ResetKohState();
                 if (_specialsKohField == null) return;
                 var koh = _specialsKohField.GetValue(null);
@@ -284,7 +379,29 @@ namespace Si_KingOfTheHill
 
                 _kohTower = obj.transform;
                 _kohCenter = _kohTower.position;
+                _kohRotation = _kohTower.rotation;
                 _hasKoh = true;
+                _kohRespawnCount = 0;
+                _kohAliveCheckTimer = KOH_ALIVE_CHECK_INTERVAL;
+                // Cache prefab + team so we can auto-respawn the building if a player
+                // manages to slip damage past the immunity patches. Strip "(Clone)" to
+                // recover the prefab key used in GameDatabase.
+                try
+                {
+                    string prefabKey = obj.name ?? "";
+                    if (prefabKey.EndsWith("(Clone)"))
+                        prefabKey = prefabKey.Substring(0, prefabKey.Length - "(Clone)".Length);
+                    int pIdx = GameDatabase.GetSpawnablePrefabIndex(prefabKey);
+                    _kohPrefabRef = (pIdx >= 0) ? GameDatabase.GetSpawnablePrefab(pIdx) : null;
+                    var bgo = obj.GetComponent<BaseGameObject>();
+                    _kohTeam = bgo?.Team;
+                    if (_kohPrefabRef == null)
+                        MelonLogger.Warning($"[KGT] KoH prefab '{prefabKey}' not in GameDatabase — auto-respawn disabled this round");
+                }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning($"[KGT] Caching KoH prefab/team failed: {ex.Message}");
+                }
                 // Reset damage diagnostic so this round's HIT/MISS lines aren't suppressed.
                 ResetDamageDiag();
 
@@ -321,8 +438,14 @@ namespace Si_KingOfTheHill
             DespawnOutposts(); // before clearing _kohTower so we can still find the ring
             _kohTower = null;
             _kohCenter = Vector3.zero;
+            _kohRotation = Quaternion.identity;
             _hasKoh = false;
             _neutralTeam = null; // re-resolve on next spawn (KoH may be different team next round)
+            // Auto-respawn cache — must clear so next round picks up the new map's prefab/team.
+            _kohPrefabRef = null;
+            _kohTeam = null;
+            _kohRespawnCount = 0;
+            _kohAliveCheckTimer = 0f;
             // King + timer reset is handled in King.ResetKingState()
             ResetKingState();
         }

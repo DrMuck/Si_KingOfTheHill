@@ -48,7 +48,26 @@ namespace Si_KingOfTheHill
         static void OnBuyCommand(Player? caller, string args)
         {
             if (caller == null) return;
+            if (!ModeBuyActive)
+            {
+                Reply(caller, "[KGT/Buy] /buy is currently disabled.");
+                return;
+            }
+            if (Cfg.BuyAdminOnly && !caller.CanAdminExecute(Power.Generic))
+            {
+                Reply(caller, "[KGT/Buy] /buy is admin-only on this server.");
+                return;
+            }
             long key = GetPlayerSteamId(caller);
+            // If the caller is an admin with an open !b editor session, /1-/N would
+            // route to BOTH menus and dump balance/HTP output into the buy session.
+            // Refuse and ask them to close !b first. Non-admins can't open !b so they
+            // skip this guard automatically.
+            if (caller.CanAdminExecute(Power.Generic) && IsUnitBalanceEditorOpen(key))
+            {
+                Reply(caller, "[KGT/Buy] You have a balance editor (/b) session open. Close it first (type /b again), then run /buy.");
+                return;
+            }
             if (!_buyStates.TryGetValue(key, out var state))
             {
                 state = new BuyState();
@@ -460,6 +479,48 @@ namespace Si_KingOfTheHill
         static void ResetBuyState()
         {
             _buyStates.Clear();
+        }
+
+        // ----- Cross-mod menu collision guard -----
+        //
+        // Si_UnitBalanceUI keeps per-player admin-editor sessions in
+        //   private static Dictionary<long, BalanceMenuState> _menuStates
+        // on type Si_UnitBalance.Si_UnitBalance. We reflect-probe it (no compile-time
+        // dependency) so we can detect when /b is open and tell the admin to close it
+        // before opening /buy — otherwise /1-/N navigation would feed both menus.
+
+        static System.Reflection.FieldInfo? _ubMenuStatesField;
+        static bool _ubProbed;
+
+        static bool IsUnitBalanceEditorOpen(long steamId)
+        {
+            if (!_ubProbed)
+            {
+                _ubProbed = true;
+                try
+                {
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        var t = asm.GetType("Si_UnitBalance.Si_UnitBalance");
+                        if (t == null) continue;
+                        _ubMenuStatesField = t.GetField("_menuStates",
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                        MelonLogger.Msg($"[KGT/Buy] Si_UnitBalanceUI integration: _menuStates={_ubMenuStatesField != null}");
+                        break;
+                    }
+                }
+                catch (Exception ex) { MelonLogger.Warning($"[KGT/Buy] UnitBalanceUI probe failed: {ex.Message}"); }
+            }
+            if (_ubMenuStatesField == null) return false;
+            try
+            {
+                var dict = _ubMenuStatesField.GetValue(null);
+                if (dict == null) return false;
+                var contains = dict.GetType().GetMethod("ContainsKey", new[] { typeof(long) });
+                var result = contains?.Invoke(dict, new object[] { steamId });
+                return result is bool b && b;
+            }
+            catch { return false; }
         }
     }
 }

@@ -41,7 +41,7 @@ namespace Si_KingOfTheHill
         {
             try
             {
-                if (!Cfg.Enabled || !_hasKoh) return;
+                if (!ModeKohActive || !_hasKoh) return;
                 if (args == null || args.Block) return;
                 if (args.ParentStructure == null) return;
 
@@ -58,9 +58,10 @@ namespace Si_KingOfTheHill
                 float exclusion = (_exclusionRadius > 0f) ? _exclusionRadius : Cfg.BuildExclusionRadius;
                 if (exclusion <= 0f) return;
 
-                // Current king can build inside their hill (defender's advantage).
-                bool isKing = (_currentKing != null && ReferenceEquals(team, _currentKing));
                 // Neutral teams (KoH building itself, Wildlife, Gamemaster) are exempt.
+                // King exemption removed — the capture zone is off-limits to everyone
+                // (matches user intent that aliens shouldn't get to fortify the zone
+                //  just because they hold the king at the moment).
                 bool isNeutral = IsGamemasterTeam(team);
 
                 // 2D (XZ) distance to the KoH centre.
@@ -70,9 +71,9 @@ namespace Si_KingOfTheHill
                 float exclSq = exclusion * exclusion;
                 bool inside = (distSq <= exclSq);
 
-                MelonLogger.Msg($"[KGT] AntiBuild fired: team={team.GetTeamShortName()} type={args.ConstructionData?.ObjectInfo?.DisplayName ?? "?"} dist={Mathf.Sqrt(distSq):F0}m (excl={exclusion:F0}m) isKing={isKing} isNeutral={isNeutral} inside={inside}");
+                MelonLogger.Msg($"[KGT] AntiBuild fired: team={team.GetTeamShortName()} type={args.ConstructionData?.ObjectInfo?.DisplayName ?? "?"} dist={Mathf.Sqrt(distSq):F0}m (excl={exclusion:F0}m) isNeutral={isNeutral} inside={inside}");
 
-                if (isKing || isNeutral) return;
+                if (isNeutral) return;
                 if (!inside) return;
 
                 args.Block = true;

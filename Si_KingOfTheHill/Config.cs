@@ -14,6 +14,27 @@ namespace Si_KingOfTheHill
             public bool Enabled = true;
             public bool OnlyInStrategyMode = true;
 
+            // Operating mode (gates which mod subsystems run):
+            //   1 = Full KoH  → intro, capture zone, building protection, AntiBuild, /buy, rewards (default)
+            //   2 = BuyOnly   → no intro, no capture zone, no KoH spawn / immunity / AntiBuild.
+            //                   /buy still works, kill rewards still fire, starter credits granted.
+            //   3 = Disabled  → mod loads but every subsystem is inert.
+            // Change at runtime with `/koh mode <N>` (admin only).
+            public int Mode = 1;
+
+            // Starter credits granted to each player once per round (modes 1 & 2 only).
+            // 0 disables. Players joining mid-round receive the grant on connect.
+            public int StarterCreditsPerPlayer = 0;
+
+            // When true, /buy is restricted to admins (anyone who passes
+            // SilicaAdminMod's CanAdminExecute check). Default false = everyone can /buy.
+            public bool BuyAdminOnly = false;
+
+            // Master switch for the headhunter bounty system. When false, no announcements
+            // fire and no kill payouts are made (even if Bounties.json has entries).
+            // Default true so a populated Bounties.json "just works" out of the box.
+            public bool BountiesEnabled = true;
+
             // Note: the KoH prefab is owned by Si_MapBalance (its KohEntry.PrefabName field).
             // KGT just consumes the spawned GameObject via MapBalanceSpecials.Koh.
             public float CaptureRadius = 50.0f;
@@ -75,6 +96,42 @@ namespace Si_KingOfTheHill
             // Team.StoreResource (overflow → Team.StartingResources).
             public bool  CommanderRewardEnabled    = true;
             public float CommanderRewardMultiplier = 1.0f;
+
+            // === Commander reward handicap (anti-snowball) ===
+            // Every HandicapRecomputeIntervalSeconds, score each team as
+            //   score = TotalResources * HandicapResourceWeight
+            //         + Units.Count * 100 * HandicapMilitaryWeight
+            // and compute the team's ratio to the average. Their commander-reward
+            // multiplier is then scaled by ratio^(-HandicapStrength), clamped to
+            // [HandicapFloorMult, HandicapCeilingMult]. Result:
+            //   dominant team (ratio > 1)  → multiplier shrinks (gets less reward)
+            //   trailing team (ratio < 1)  → multiplier grows  (gets more reward)
+            // Set HandicapEnabled = false to disable and use a flat multiplier.
+            public bool  HandicapEnabled                   = true;
+            public float HandicapResourceWeight            = 1.0f;
+            public float HandicapMilitaryWeight            = 0.5f;
+            public float HandicapStrength                  = 1.0f;
+            public float HandicapFloorMult                 = 0.25f;
+            public float HandicapCeilingMult               = 3.0f;
+            public float HandicapRecomputeIntervalSeconds  = 5.0f;
+
+            // === Round-start intro ===
+            // Multi-line chat explanation + optional voice-over wav played server-wide.
+            // Set IntroEnabled=false to suppress both chat lines and sound on round start.
+            // Set SoundIntro to "" to play chat only.
+            public bool   IntroEnabled = true;
+            // Intro is paced as a per-line script: chat line → IntroSoundLeadSeconds
+            // pause → spoken wav → IntroLinePauseSeconds pause → next line. Each wav
+            // is short (~3–8s) to avoid the cumulative jitter that AdminMod's
+            // Task.Delay-based audio streamer suffers on long files.
+            public float  IntroStartDelaySeconds = 5.0f;  // game-start → first chat broadcast
+            public float  IntroSoundLeadSeconds = 0.3f;   // chat broadcast → sound start
+            public float  IntroLinePauseSeconds = 1.0f;   // sound end → next chat broadcast
+            // Legacy fields. Ignored now that the intro is per-line scripted. Kept
+            // so old configs deserialize without errors.
+            public string SoundIntro                = "";    // single-file mode removed
+            public float  IntroLineIntervalSeconds  = 10.0f; // superseded by per-line timing
+            public float  IntroSoundDelaySeconds    = 0.0f;  // single-file deferred play, removed
 
             // === Sound files (relative to server cwd; "sounds/x.wav" → UserData/sounds/x.wav) ===
             // British TTS clips generated via edge-tts. Set any to "" to disable that one.

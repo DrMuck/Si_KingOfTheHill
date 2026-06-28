@@ -36,6 +36,11 @@ namespace Si_KingOfTheHill
         // transform after Destroy).
         static readonly List<string> _outpostTeamNames = new List<string>();
         static readonly List<Vector3> _outpostPositions = new List<Vector3>();
+        // Per-slot currently-displayed team. Lets UpdateOutpostClock do an
+        // incremental flip — only the slots whose desired team differs from the
+        // current one are despawned+respawned, instead of churning all 12 outposts
+        // (24 networked ops per change) every time the king count or team changes.
+        static readonly List<Team?> _outpostSlotTeams = new List<Team?>();
         static Team? _outpostKingTeam;           // current king team painted on ring (null = all neutral)
         static int _outpostKingCount;            // 0..Cfg.OutpostCount
         static Team? _neutralTeam;               // cached KoH building's team (Wildlife by default)
@@ -87,34 +92,9 @@ namespace Si_KingOfTheHill
             for (int i = 0; i < total; i++)
             {
                 Team teamForThis = (i < kingN && kingTeam != null) ? kingTeam : _neutralTeam;
-
-                float angle = (i / (float)total) * 2f * Mathf.PI;
-                float x = _kohCenter.x + _captureRadius * Mathf.Cos(angle);
-                float z = _kohCenter.z + _captureRadius * Mathf.Sin(angle);
-                float y = SampleSurfaceY(terrain, x, z) - buryDepth;
-
-                try
+                if (SpawnSlot(i, teamForThis, prefab, terrain, buryDepth))
                 {
-                    var spawnPos = new Vector3(x, y, z);
-                    var go = Game.SpawnPrefab(prefab, null, teamForThis,
-                                              spawnPos,
-                                              Quaternion.identity, true, true);
-                    if (go != null)
-                    {
-                        _outposts.Add(go);
-                        string teamShort = ReplayTeamTag(teamForThis);
-                        _outpostTeamNames.Add(teamShort);
-                        _outpostPositions.Add(spawnPos);
-                        if (i < kingN) spawnedKing++; else spawnedNeutral++;
-                        // MapReplay: emit a construction_complete so the buildings dict
-                        // gains this outpost under (team, "Outpost", x, z) and the renderer
-                        // picks up the team colour at the ring slot.
-                        LogReplayConstructionComplete(teamShort, "Outpost", spawnPos);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    MelonLogger.Warning($"[KGT] Outpost spawn at ({x:F0},{z:F0}) failed: {ex.Message}");
+                    if (i < kingN) spawnedKing++; else spawnedNeutral++;
                 }
             }
             _outpostKingTeam = kingTeam;
@@ -123,8 +103,81 @@ namespace Si_KingOfTheHill
         }
 
         /// <summary>
-        /// Convenience entry point — recompute kingCount from progress fraction and respawn
-        /// only if the (kingTeam, kingCount) pair actually changed. Cheap to call per-tick.
+        /// Spawn one outpost at slot index <paramref name="i"/> with the given team.
+        /// Appends to / fills the per-slot parallel arrays so indices stay aligned.
+        /// </summary>
+        static bool SpawnSlot(int i, Team team, GameObject prefab, Terrain terrain, float buryDepth)
+        {
+            int total = Mathf.Max(1, Cfg.OutpostCount);
+            float angle = (i / (float)total) * 2f * Mathf.PI;
+            float x = _kohCenter.x + _captureRadius * Mathf.Cos(angle);
+            float z = _kohCenter.z + _captureRadius * Mathf.Sin(angle);
+            float y = SampleSurfaceY(terrain, x, z) - buryDepth;
+            var spawnPos = new Vector3(x, y, z);
+
+            try
+            {
+                var go = Game.SpawnPrefab(prefab, null, team, spawnPos, Quaternion.identity, true, true);
+                if (go == null) return false;
+                // Pad lists up to index i so we can write at the exact slot.
+                while (_outposts.Count <= i)
+                {
+                    _outposts.Add(null!);
+                    _outpostTeamNames.Add("");
+                    _outpostPositions.Add(Vector3.zero);
+                    _outpostSlotTeams.Add(null);
+                }
+                _outposts[i] = go;
+                string teamShort = ReplayTeamTag(team);
+                _outpostTeamNames[i] = teamShort;
+                _outpostPositions[i] = spawnPos;
+                _outpostSlotTeams[i] = team;
+                LogReplayConstructionComplete(teamShort, "Outpost", spawnPos);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[KGT] Outpost spawn at slot {i} ({x:F0},{z:F0}) failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Kill the outpost at slot <paramref name="i"/> and emit the MapReplay
+        /// structure_kill marker. Leaves a null hole in the lists so future spawns
+        /// can fill the same index without shifting everything.
+        /// </summary>
+        static void DespawnSlot(int i)
+        {
+            if (i < 0 || i >= _outposts.Count) return;
+            // MapReplay marker first so it lands BEFORE the kill processes.
+            if (i < _outpostPositions.Count && i < _outpostTeamNames.Count
+                && !string.IsNullOrEmpty(_outpostTeamNames[i]))
+            {
+                LogReplayStructureKill("Outpost", _outpostTeamNames[i], _outpostPositions[i]);
+            }
+            var go = _outposts[i];
+            if (go != null)
+            {
+                try
+                {
+                    var dm = go.GetComponent<DamageManager>();
+                    if (dm != null) dm.SetHealth01(0f);
+                    else UnityEngine.Object.Destroy(go);
+                }
+                catch (Exception ex) { MelonLogger.Warning($"[KGT] Slot {i} despawn failed: {ex.Message}"); }
+            }
+            _outposts[i] = null!;
+            if (i < _outpostTeamNames.Count) _outpostTeamNames[i] = "";
+            if (i < _outpostSlotTeams.Count) _outpostSlotTeams[i] = null;
+        }
+
+        /// <summary>
+        /// Recompute kingCount from progress fraction and update the ring incrementally.
+        /// Only slots whose desired team differs from their current displayed team are
+        /// despawned + respawned. A 1-slot bump triggers ~2 networked ops instead of 24.
+        /// Falls back to a full SpawnOutpostsSplit on the very first call (no per-slot
+        /// state to diff against).
         /// </summary>
         static void UpdateOutpostClock(Team? king, float progressFraction)
         {
@@ -135,7 +188,55 @@ namespace Si_KingOfTheHill
             // No-op if neither the count nor the team changed.
             if (kingN == _outpostKingCount && ReferenceEquals(king, _outpostKingTeam)) return;
 
-            SpawnOutpostsSplit(king, kingN);
+            // First spawn this round → full ring (cheaper than padding to 12 then flipping).
+            if (_outposts.Count == 0)
+            {
+                SpawnOutpostsSplit(king, kingN);
+                return;
+            }
+
+            // Ensure neutral team is resolved.
+            if (_neutralTeam == null && _kohTower != null)
+            {
+                try
+                {
+                    var bgo = _kohTower.GetComponent<BaseGameObject>();
+                    _neutralTeam = bgo?.Team;
+                }
+                catch { }
+            }
+            if (_neutralTeam == null)
+            {
+                // Fall back to full respawn (which has its own neutral-team guard).
+                SpawnOutpostsSplit(king, kingN);
+                return;
+            }
+
+            // Resolve prefab + terrain once for the loop.
+            int prefabIdx;
+            try { prefabIdx = GameDatabase.GetSpawnablePrefabIndex(OUTPOST_PREFAB_NAME); }
+            catch (Exception ex) { MelonLogger.Warning($"[KGT] GetSpawnablePrefabIndex threw: {ex.Message}"); return; }
+            if (prefabIdx < 0) return;
+            var prefab = GameDatabase.GetSpawnablePrefab(prefabIdx);
+            if (prefab == null) return;
+            var terrain = Terrain.activeTerrain;
+            float buryDepth = Cfg.OutpostBuryDepth;
+
+            // Diff each slot. Only flip the ones whose desired team differs.
+            int flipped = 0;
+            for (int i = 0; i < total; i++)
+            {
+                Team desired = (i < kingN && king != null) ? king : _neutralTeam;
+                Team? current = (i < _outpostSlotTeams.Count) ? _outpostSlotTeams[i] : null;
+                if (ReferenceEquals(current, desired)) continue;
+                DespawnSlot(i);
+                SpawnSlot(i, desired, prefab, terrain, buryDepth);
+                flipped++;
+            }
+            _outpostKingTeam = king;
+            _outpostKingCount = kingN;
+            if (flipped > 0)
+                MelonLogger.Msg($"[KGT] Outpost clock incremental: flipped {flipped}/{total} slot(s)");
         }
 
         static void DespawnOutposts()
@@ -167,6 +268,7 @@ namespace Si_KingOfTheHill
             _outposts.Clear();
             _outpostTeamNames.Clear();
             _outpostPositions.Clear();
+            _outpostSlotTeams.Clear();
             _outpostKingTeam = null;
             _outpostKingCount = 0;
         }

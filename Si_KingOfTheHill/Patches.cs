@@ -210,6 +210,28 @@ namespace Si_KingOfTheHill
         static readonly System.Collections.Generic.Dictionary<object, bool> _teamClassification
             = new System.Collections.Generic.Dictionary<object, bool>();
 
+        static bool ShortNameIsNeutral(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            // Exact short-name match for the Gamemaster team (Silica uses "GM"; some mods
+            // use "Master") plus the wildlife / worm tribes that KoH should never anger.
+            return s.Equals("GM",       StringComparison.OrdinalIgnoreCase)
+                || s.Equals("Master",   StringComparison.OrdinalIgnoreCase)
+                || s.Equals("Wildlife", StringComparison.OrdinalIgnoreCase)
+                || s.Equals("Worm",     StringComparison.OrdinalIgnoreCase);
+        }
+
+        static bool GoNameIsNeutral(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            // GameObject name substrings — keep as substring match in case the engine
+            // prefixes/suffixes the type (e.g. "Wildlife_AI_root").
+            return s.IndexOf("Master",     StringComparison.OrdinalIgnoreCase) >= 0
+                || s.IndexOf("Gamemaster", StringComparison.OrdinalIgnoreCase) >= 0
+                || s.IndexOf("Wildlife",   StringComparison.OrdinalIgnoreCase) >= 0
+                || s.IndexOf("Worm",       StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         static bool IsGamemasterTeam(object? team)
         {
             if (team == null) return false;
@@ -218,12 +240,10 @@ namespace Si_KingOfTheHill
             // First-time encounter for this team object: do the slow classification once.
             string shortName = (_teamShortNameField?.GetValue(team) as string) ?? "";
             string goName = (team as Component)?.name ?? "";
-            bool isNeutral = shortName.IndexOf("Master", StringComparison.OrdinalIgnoreCase) >= 0
-                          || shortName.IndexOf("Wildlife", StringComparison.OrdinalIgnoreCase) >= 0
-                          || shortName.IndexOf("Worm", StringComparison.OrdinalIgnoreCase) >= 0
-                          || goName.IndexOf("Master", StringComparison.OrdinalIgnoreCase) >= 0
-                          || goName.IndexOf("Wildlife", StringComparison.OrdinalIgnoreCase) >= 0
-                          || goName.IndexOf("Worm", StringComparison.OrdinalIgnoreCase) >= 0;
+            // Match neutral / unaligned teams. Silica uses "GM" (not "Master") as the
+            // Gamemaster team's TeamShortName, so we need both. Match by exact-short
+            // names + GameObject-name substrings to be defensive against future variations.
+            bool isNeutral = ShortNameIsNeutral(shortName) || GoNameIsNeutral(goName);
             _teamClassification[team] = isNeutral; // cache BOTH true and false
             MelonLogger.Msg($"[KGT] Team classified: short='{shortName}', go='{goName}' -> neutral={isNeutral}");
             return isNeutral;
@@ -248,7 +268,7 @@ namespace Si_KingOfTheHill
         /// Harmony prefix on DamageManager.ApplyDamage. If the DamageManager belongs to the
         /// KoH building, force damage to 0 and skip the original.
         /// </summary>
-        static bool Prefix_ApplyDamage(object __instance, ref float __result)
+        static bool Prefix_ApplyDamage(object __instance, ref float __result, GameObject? __3)
         {
             try
             {
@@ -267,7 +287,8 @@ namespace Si_KingOfTheHill
                         if (_damageHitLog < DAMAGE_DIAG_LIMIT)
                         {
                             _damageHitLog++;
-                            MelonLogger.Msg($"[KoH/DBG] ApplyDamage HIT #{_damageHitLog} — KoH immunity engaged (damage zeroed)");
+                            string atk = DescribeInstigator(__3);
+                            MelonLogger.Msg($"[KoH/DBG] ApplyDamage HIT #{_damageHitLog} — KoH immunity engaged (damage zeroed) | attacker={atk}");
                         }
                         __result = 0f;
                         return false; // skip original — KoH is immune
@@ -404,14 +425,27 @@ namespace Si_KingOfTheHill
             System.Reflection.Emit.ILGenerator generator)
         {
             var codes = new System.Collections.Generic.List<CodeInstruction>(instructions);
-            FieldInfo? healthField = _damageManagerType?.GetField("Health",
+            // Silica < 0.9.27: Health was a public field.
+            // Silica ≥ 0.9.27: Health is a property; the underlying storage is HealthInternal.
+            // Try the property route first; fall back to field-mode for older builds.
+            FieldInfo?   healthField  = _damageManagerType?.GetField("Health",
                 BindingFlags.Public | BindingFlags.Instance);
-            MethodInfo? onDmgRecv = _damageManagerType?.GetMethod("OnDamageReceived",
+            PropertyInfo? healthProp  = _damageManagerType?.GetProperty("Health",
+                BindingFlags.Public | BindingFlags.Instance);
+            MethodInfo?  healthGetter = healthProp?.GetGetMethod(nonPublic: true);
+            MethodInfo?  healthSetter = healthProp?.GetSetMethod(nonPublic: true);
+            MethodInfo?  onDmgRecv    = _damageManagerType?.GetMethod("OnDamageReceived",
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
 
-            if (healthField == null || onDmgRecv == null)
+            bool propMode = healthField == null && healthGetter != null && healthSetter != null;
+            bool fieldMode = healthField != null;
+
+            if (onDmgRecv == null || (!propMode && !fieldMode))
             {
-                MelonLogger.Warning("[KGT] Transpile_OnReceive: Health field or OnDamageReceived not found — passing through original IL");
+                MelonLogger.Warning(
+                    "[KGT] Transpile_OnReceive: Health not resolvable (field=" + (healthField != null) +
+                    ", prop=" + (healthProp != null) + ", get=" + (healthGetter != null) +
+                    ", set=" + (healthSetter != null) + ") or OnDamageReceived missing — passing through original IL");
                 return codes;
             }
 
@@ -438,42 +472,56 @@ namespace Si_KingOfTheHill
             var postLabel = generator.DefineLabel();
             codes[postIdx].labels.Add(postLabel);
 
-            // 3) Walk backwards from onDmgIdx to find the `stfld Health` (the Health -= value line).
-            //    Then continue backwards to find the preceding `ldarg.0 ldarg.0 ldfld Health` triple
-            //    which is where the Health-decrement expression begins.
-            int stfldHealthIdx = -1;
+            // 3) Walk backwards from onDmgIdx to find the Health write (the Health -= value line).
+            //    Field mode: stfld Health
+            //    Property mode: call/callvirt set_Health
+            int writeIdx = -1;
             for (int i = onDmgIdx - 1; i >= 0; i--)
             {
-                if (codes[i].opcode == System.Reflection.Emit.OpCodes.Stfld
+                var op = codes[i].opcode;
+                if (fieldMode
+                    && op == System.Reflection.Emit.OpCodes.Stfld
                     && codes[i].operand is FieldInfo fi && fi == healthField)
                 {
-                    stfldHealthIdx = i;
+                    writeIdx = i;
+                    break;
+                }
+                if (propMode
+                    && (op == System.Reflection.Emit.OpCodes.Call || op == System.Reflection.Emit.OpCodes.Callvirt)
+                    && codes[i].operand is MethodInfo sm && sm == healthSetter)
+                {
+                    writeIdx = i;
                     break;
                 }
             }
-            if (stfldHealthIdx < 0)
+            if (writeIdx < 0)
             {
-                MelonLogger.Warning("[KGT] Transpile_OnReceive: stfld Health not found before OnDamageReceived — passing through");
+                MelonLogger.Warning("[KGT] Transpile_OnReceive: Health write site (stfld or set_Health) not found before OnDamageReceived — passing through");
                 return codes;
             }
 
-            // The "Health -= value" expression in IL looks like:
-            //   ldarg.0          (idx blockStart)
-            //   ldarg.0
-            //   ldfld Health
-            //   ldloc value
-            //   sub
-            //   stfld Health     (idx stfldHealthIdx)
-            // We want to insert our check BEFORE blockStart.
+            // The "Health -= value" expression in IL:
+            //   Field mode:                    Property mode:
+            //     ldarg.0  (blockStart)          ldarg.0  (blockStart, the 'this' for set_Health)
+            //     ldarg.0                        ldarg.0  (the 'this' for get_Health)
+            //     ldfld Health                   call get_Health
+            //     ldloc value                    ldloc value
+            //     sub                            sub
+            //     stfld Health  (writeIdx)       call set_Health  (writeIdx)
             int blockStart = -1;
-            for (int i = stfldHealthIdx - 1; i >= System.Math.Max(0, stfldHealthIdx - 8); i--)
+            for (int i = writeIdx - 1; i >= System.Math.Max(0, writeIdx - 10); i--)
             {
-                // Look for the pattern: [i] = ldarg.0, [i+1] = ldarg.0, [i+2] = ldfld Health
-                if (i + 2 < codes.Count
-                    && codes[i].opcode == System.Reflection.Emit.OpCodes.Ldarg_0
-                    && codes[i + 1].opcode == System.Reflection.Emit.OpCodes.Ldarg_0
-                    && codes[i + 2].opcode == System.Reflection.Emit.OpCodes.Ldfld
-                    && codes[i + 2].operand is FieldInfo f2 && f2 == healthField)
+                if (i + 2 >= codes.Count) continue;
+                if (codes[i].opcode != System.Reflection.Emit.OpCodes.Ldarg_0) continue;
+                if (codes[i + 1].opcode != System.Reflection.Emit.OpCodes.Ldarg_0) continue;
+                var third = codes[i + 2];
+                bool matchesField = fieldMode
+                    && third.opcode == System.Reflection.Emit.OpCodes.Ldfld
+                    && third.operand is FieldInfo f2 && f2 == healthField;
+                bool matchesProp = propMode
+                    && (third.opcode == System.Reflection.Emit.OpCodes.Call || third.opcode == System.Reflection.Emit.OpCodes.Callvirt)
+                    && third.operand is MethodInfo gm && gm == healthGetter;
+                if (matchesField || matchesProp)
                 {
                     blockStart = i;
                     break;
@@ -481,7 +529,7 @@ namespace Si_KingOfTheHill
             }
             if (blockStart < 0)
             {
-                MelonLogger.Warning("[KGT] Transpile_OnReceive: ldarg.0 ldarg.0 ldfld Health preamble not found — passing through");
+                MelonLogger.Warning("[KGT] Transpile_OnReceive: Health-decrement preamble (ldarg.0 ldarg.0 ld[fld|call get]_Health) not found — passing through");
                 return codes;
             }
 
@@ -509,6 +557,41 @@ namespace Si_KingOfTheHill
 
             MelonLogger.Msg("[KGT] Transpiled OnReceiveClientDamageHitPacket — KoH skip-branch injected before Health decrement");
             return codes;
+        }
+
+        /// <summary>
+        /// Compact human-readable description of a damage instigator. Tries to identify
+        /// the controlling player (if any), the owning team, and the unit/structure name
+        /// so the diagnostic distinguishes AI attacks from player-controlled hits.
+        /// </summary>
+        static string DescribeInstigator(GameObject? instigator)
+        {
+            if (instigator == null) return "<null>";
+            try
+            {
+                string goName = instigator.name ?? "?";
+                // Walk to a BaseGameObject (Unit / Structure) if present.
+                var bgo = instigator.GetComponentInParent<BaseGameObject>();
+                string teamName = "?";
+                string playerName = "";
+                if (bgo != null)
+                {
+                    try { teamName = bgo.Team?.GetTeamShortName() ?? "?"; } catch { }
+                    try
+                    {
+                        var owner = bgo.NetworkComponent?.OwnerPlayer;
+                        if (owner != null) playerName = owner.PlayerName ?? "";
+                    }
+                    catch { }
+                }
+                if (!string.IsNullOrEmpty(playerName))
+                    return $"player='{playerName}' team={teamName} unit={goName}";
+                return $"ai team={teamName} unit={goName}";
+            }
+            catch (Exception)
+            {
+                return instigator.name ?? "<err>";
+            }
         }
 
         static string BuildHierarchyChain(Transform leaf)

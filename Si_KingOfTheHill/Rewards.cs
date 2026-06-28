@@ -60,6 +60,47 @@ namespace Si_KingOfTheHill
             _playerCredits.Clear();
         }
 
+        /// <summary>
+        /// Grant Cfg.StarterCreditsPerPlayer to each connected player who hasn't yet
+        /// received it this round. Single-shot per Steam ID (tracked in
+        /// _starterCreditsGranted), so calling repeatedly from OnUpdate is safe.
+        /// </summary>
+        static void GrantStarterCreditsToAll()
+        {
+            int amount = Cfg.StarterCreditsPerPlayer;
+            if (amount <= 0) return;
+            try
+            {
+                var players = Player.Players;
+                if (players == null) return;
+                int granted = 0;
+                for (int i = 0; i < players.Count; i++)
+                {
+                    var p = players[i];
+                    if (p == null) continue;
+                    // Skip the server's ghost player.
+                    if (p == NetworkGameServer.GetServerPlayer()) continue;
+                    long sid = GetPlayerSteamId(p);
+                    if (sid == 0) continue;
+                    if (!_starterCreditsGranted.Add(sid)) continue;  // already received
+                    AddCredits(sid, amount);
+                    granted++;
+                    try
+                    {
+                        HelperMethods.SendChatMessageToPlayer(p,
+                            $"[KGT] Welcome — starter credits: <color=#39ff14>{amount}</color>cr. Type /buy to spend.");
+                    }
+                    catch { }
+                }
+                if (granted > 0)
+                    MelonLogger.Msg($"[KGT] Starter credits: granted {amount}cr to {granted} player(s)");
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[KGT] GrantStarterCreditsToAll threw: {ex.Message}");
+            }
+        }
+
         // ----- Event hookup -----
 
         static void HookRewards()
@@ -93,7 +134,7 @@ namespace Si_KingOfTheHill
         {
             try
             {
-                if (!Cfg.Enabled || unit == null || unit.ObjectInfo == null || instigator == null) return;
+                if (!ModeBuyActive || unit == null || unit.ObjectInfo == null || instigator == null) return;
 
                 // Walk instigator -> BaseGameObject -> OwnerPlayer
                 BaseGameObject? attacker = GameFuncs.GetBaseGameObject(instigator);
@@ -118,6 +159,9 @@ namespace Si_KingOfTheHill
                         $"[KGT] +<color=#39ff14>{reward}</color>cr (killed {victimName}). Total: {GetCredits(key)}cr");
                 }
                 catch { }
+
+                // Headhunter bounty bonus — paid on top of the normal kill reward.
+                PayBountyIfApplicable(unit, killer);
             }
             catch (Exception ex)
             {
@@ -131,7 +175,7 @@ namespace Si_KingOfTheHill
         {
             try
             {
-                if (!Cfg.Enabled || structure == null || structure.ObjectInfo == null || instigator == null) return;
+                if (!ModeBuyActive || structure == null || structure.ObjectInfo == null || instigator == null) return;
 
                 BaseGameObject? attacker = GameFuncs.GetBaseGameObject(instigator);
                 Player? killer = attacker?.NetworkComponent?.OwnerPlayer;
@@ -161,6 +205,92 @@ namespace Si_KingOfTheHill
             }
         }
 
+        // ----- Commander handicap (anti-snowball) -----
+        //
+        // Periodically scores every non-neutral team by resources + unit count and
+        // assigns each a reward multiplier so the trailing team earns more per
+        // tick than the dominant one. Cheap: a handful of property reads every
+        // HandicapRecomputeIntervalSeconds, cached in a dict for O(1) lookup at
+        // reward time.
+
+        static readonly Dictionary<Team, float> _handicapMult = new Dictionary<Team, float>();
+        static float _handicapTimer = 0f;
+
+        /// <summary>
+        /// Recompute per-team handicap multipliers. Called from OnUpdate every tick;
+        /// only does real work every Cfg.HandicapRecomputeIntervalSeconds.
+        /// </summary>
+        static void RecomputeHandicap(float dt)
+        {
+            if (!Cfg.HandicapEnabled)
+            {
+                if (_handicapMult.Count > 0) _handicapMult.Clear();
+                return;
+            }
+
+            _handicapTimer -= dt;
+            if (_handicapTimer > 0f) return;
+            _handicapTimer = Mathf.Max(1f, Cfg.HandicapRecomputeIntervalSeconds);
+
+            try
+            {
+                var teams = Team.Teams;
+                if (teams == null || teams.Count < 2) { _handicapMult.Clear(); return; }
+
+                // Two-pass: first build raw scores, then derive multipliers from the mean.
+                var raw = new Dictionary<Team, float>();
+                float total = 0f;
+                int active = 0;
+
+                for (int i = 0; i < teams.Count; i++)
+                {
+                    var team = teams[i];
+                    if (team == null) continue;
+                    if (IsGamemasterTeam(team)) continue;  // skip Wildlife / GM / Worm
+
+                    float resources = 0f;
+                    int unitCount = 0;
+                    try { resources = team.TotalResources; } catch { }
+                    try { unitCount = team.Units?.Count ?? 0; } catch { }
+
+                    float score = resources * Cfg.HandicapResourceWeight
+                                + unitCount * 100f * Cfg.HandicapMilitaryWeight;
+                    raw[team] = score;
+                    total += score;
+                    active++;
+                }
+
+                _handicapMult.Clear();
+                if (active < 2 || total <= 0f) return;
+
+                float avg = total / active;
+                float k = Cfg.HandicapStrength;
+                float floor = Mathf.Max(0.01f, Cfg.HandicapFloorMult);
+                float ceiling = Mathf.Max(floor, Cfg.HandicapCeilingMult);
+
+                foreach (var kv in raw)
+                {
+                    float ratio = kv.Value / avg;
+                    if (ratio <= 0f) ratio = 0.001f;  // avoid divide-by-zero / NaN
+                    // mult = ratio^(-k). Default k=1 gives mult = 1/ratio.
+                    float mult = Mathf.Pow(ratio, -k);
+                    mult = Mathf.Clamp(mult, floor, ceiling);
+                    _handicapMult[kv.Key] = mult;
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[KGT] RecomputeHandicap threw: {ex.Message}");
+            }
+        }
+
+        /// <summary>O(1) lookup. Returns 1.0 when handicap is disabled or team isn't tracked yet.</summary>
+        static float GetHandicapMult(Team team)
+        {
+            if (!Cfg.HandicapEnabled || team == null) return 1f;
+            return _handicapMult.TryGetValue(team, out float m) ? m : 1f;
+        }
+
         // ----- Commander faction reward (called per-tick from OnUpdate, per team in zone) -----
         //
         // Mirrors the capture-progress cap: a team's effective per-tick contribution
@@ -172,7 +302,7 @@ namespace Si_KingOfTheHill
         {
             try
             {
-                if (!Cfg.Enabled || !Cfg.CommanderRewardEnabled) return;
+                if (!ModeKohActive || !Cfg.CommanderRewardEnabled) return;
                 if (Cfg.CommanderRewardMultiplier <= 0f) return;
                 if (scores == null || scores.Count == 0) return;
 
@@ -186,7 +316,8 @@ namespace Si_KingOfTheHill
                     if (IsGamemasterTeam(team)) continue;
 
                     float effective = Mathf.Min(kvp.Value, capPerTick);
-                    int reward = Mathf.RoundToInt(effective * Cfg.CommanderRewardMultiplier);
+                    float handicap = GetHandicapMult(team);
+                    int reward = Mathf.RoundToInt(effective * Cfg.CommanderRewardMultiplier * handicap);
                     if (reward <= 0) continue;
 
                     int leftover = team.StoreResource(reward);
