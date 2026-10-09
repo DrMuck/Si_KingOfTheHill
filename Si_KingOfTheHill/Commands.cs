@@ -42,13 +42,29 @@ namespace Si_KingOfTheHill
                     break;
                 case "radius":
                     if (TryParseFloat(val, out float r) && r > 0f)
-                    { Cfg.CaptureRadius = r; SaveConfig(); Reply(caller, $"[KGT] capture radius = {r}m"); }
-                    else Reply(caller, $"[KGT] capture radius = {Cfg.CaptureRadius}m");
+                    {
+                        Cfg.CaptureRadius = r;
+                        // Runtime uses _captureRadius which is normally latched from the
+                        // KoH tower at round start. Update it live too so /koh radius
+                        // takes effect this tick.
+                        _captureRadius = r;
+                        SaveConfig();
+                        Reply(caller, $"[KGT] capture radius = {r}m (applied live)");
+                    }
+                    else Reply(caller, $"[KGT] capture radius = {_captureRadius}m (Cfg default = {Cfg.CaptureRadius})");
                     break;
                 case "threshold":
                     if (TryParseFloat(val, out float t) && t > 0f)
-                    { Cfg.WinThreshold = t; SaveConfig(); Reply(caller, $"[KGT] win threshold = {t} pts"); }
-                    else Reply(caller, $"[KGT] win threshold = {Cfg.WinThreshold} pts");
+                    {
+                        Cfg.WinThreshold = t;
+                        // Also overwrite the runtime _winThreshold (which was latched at
+                        // round start from Cfg or WinThresholdPerMap) — otherwise the
+                        // change wouldn't take effect until the next round.
+                        _winThreshold = t;
+                        SaveConfig();
+                        Reply(caller, $"[KGT] win threshold = {t} pts (applied live)");
+                    }
+                    else Reply(caller, $"[KGT] win threshold = {_winThreshold} pts (Cfg default = {Cfg.WinThreshold})");
                     break;
                 case "rate":
                     if (TryParseFloat(val, out float rate) && rate > 0f)
@@ -86,8 +102,38 @@ namespace Si_KingOfTheHill
                 case "bounty":
                     HandleBountySubcommand(caller, val, parts);
                     break;
+                case "buildingreward":
+                case "structurereward":
+                {
+                    bool? want = ParseOnOff(val);
+                    if (!want.HasValue)
+                    {
+                        Reply(caller, $"[KGT] Building-kill reward = {(Cfg.StructureKillRewardsEnabled ? "ON" : "OFF")}. Usage: /koh buildingreward <on|off>");
+                        break;
+                    }
+                    Cfg.StructureKillRewardsEnabled = want.Value;
+                    SaveConfig();
+                    Reply(caller, $"[KGT] Building-kill reward = {(want.Value ? "ON" : "OFF")}. " +
+                        (want.Value ? "Destroying enemy structures now pays the killer credits (cost × RewardKillFraction)." : "Structure destruction no longer pays the killer. Unit kills still pay."));
+                    break;
+                }
+                case "buystructures":
+                case "buybuildings":
+                {
+                    bool? want = ParseOnOff(val);
+                    if (!want.HasValue)
+                    {
+                        Reply(caller, $"[KGT] /buy structures = {(Cfg.BuyStructuresEnabled ? "ON" : "OFF")}. Usage: /koh buystructures <on|off>");
+                        break;
+                    }
+                    Cfg.BuyStructuresEnabled = want.Value;
+                    SaveConfig();
+                    Reply(caller, $"[KGT] /buy structures = {(want.Value ? "ON" : "OFF")}. " +
+                        (want.Value ? "A 'Buildings' category now appears at the end of the /buy menu." : "Structures are hidden from the /buy menu again."));
+                    break;
+                }
                 default:
-                    Reply(caller, "/koh [status|on|off|radius <m>|threshold <pts>|rate <pts/s>|reset|mode <1-3>|starter <amount>|bounty (on|off|list|add|remove|reload)]");
+                    Reply(caller, "/koh [status|on|off|radius <m>|threshold <pts>|rate <pts/s>|reset|mode <1-3>|starter <amount>|bounty (on|off|list|add|remove|reload)|buildingreward <on|off>|buystructures <on|off>]");
                     break;
             }
         }
@@ -153,6 +199,19 @@ namespace Si_KingOfTheHill
             MelonLoader.MelonLogger.Msg(msg);
         }
 
+        /// <summary>
+        /// Parses "on"/"off"/"1"/"0"/"true"/"false"/"yes"/"no" to bool. Returns null if not recognised.
+        /// Used by admin toggle commands so an empty arg shows the current state instead of flipping.
+        /// </summary>
+        static bool? ParseOnOff(string arg)
+        {
+            if (string.IsNullOrWhiteSpace(arg)) return null;
+            string a = arg.Trim().ToLowerInvariant();
+            if (a == "on" || a == "1" || a == "true"  || a == "yes" || a == "y") return true;
+            if (a == "off" || a == "0" || a == "false" || a == "no"  || a == "n") return false;
+            return null;
+        }
+
         // Server-wide chat broadcast — loops Player.Players and sends per-player. Mirrors
         // Si_CrabCannon.SendTeamChat pattern. Skips the server's own ghost player.
         /// <summary>
@@ -205,28 +264,57 @@ namespace Si_KingOfTheHill
                     return;
 
                 case "add":
+                {
                     if (parts.Length < 4 || !long.TryParse(parts[3], out long addSid))
                     {
                         Reply(caller, "[KGT/Bounty] Usage: /koh bounty add <steamId> <amount> [name...]");
                         return;
                     }
+                    // Re-read file first so any manual JSON edits (e.g. names typed in by hand)
+                    // aren't clobbered when we serialize our in-memory dict back to disk.
+                    LoadBountyConfig();
+
+                    // Parse the optional amount WITHOUT letting int.TryParse zero out the
+                    // default on a non-numeric arg (e.g. "/koh bounty add <sid> Dram" — Dram
+                    // is a name, not an amount, and falls through to the name field).
                     int addAmount = _bountyCfg.DefaultAmount;
-                    if (parts.Length >= 5) int.TryParse(parts[4], out addAmount);
-                    string addName = parts.Length >= 6 ? string.Join(" ", parts, 5, parts.Length - 5) : "";
-                    _bountyCfg.Bounties[addSid] = new BountyEntry { Name = addName, Amount = addAmount };
+                    int nameStartIdx = 4;
+                    if (parts.Length >= 5 && int.TryParse(parts[4], out int parsedAmount))
+                    {
+                        addAmount = parsedAmount;
+                        nameStartIdx = 5;
+                    }
+                    string addName = parts.Length > nameStartIdx
+                        ? string.Join(" ", parts, nameStartIdx, parts.Length - nameStartIdx)
+                        : "";
+
+                    // Preserve existing name/note if the caller didn't pass new ones.
+                    string finalName = addName;
+                    string finalNote = "";
+                    if (_bountyCfg.Bounties.TryGetValue(addSid, out var existing))
+                    {
+                        if (string.IsNullOrEmpty(finalName)) finalName = existing.Name ?? "";
+                        finalNote = existing.Note ?? "";
+                    }
+                    _bountyCfg.Bounties[addSid] = new BountyEntry { Name = finalName, Amount = addAmount, Note = finalNote };
                     SaveBountyConfig();
                     _announcedBounties.Remove(addSid); // let the announcement fire if they're already connected
-                    Reply(caller, $"[KGT/Bounty] Added: {addSid} — {(string.IsNullOrEmpty(addName) ? "(no name)" : addName)} — {addAmount}cr");
+                    Reply(caller, $"[KGT/Bounty] Added: {addSid} — {(string.IsNullOrEmpty(finalName) ? "(no name)" : finalName)} — {addAmount}cr");
                     return;
+                }
 
                 case "remove":
                 case "rm":
                 case "del":
+                {
                     if (parts.Length < 4 || !long.TryParse(parts[3], out long rmSid))
                     {
                         Reply(caller, "[KGT/Bounty] Usage: /koh bounty remove <steamId>");
                         return;
                     }
+                    // Re-read file first so we operate on the current on-disk state and
+                    // don't overwrite manual edits made between commands.
+                    LoadBountyConfig();
                     if (!_bountyCfg.Bounties.Remove(rmSid))
                     {
                         Reply(caller, $"[KGT/Bounty] No entry for {rmSid}.");
@@ -236,6 +324,7 @@ namespace Si_KingOfTheHill
                     _announcedBounties.Remove(rmSid);
                     Reply(caller, $"[KGT/Bounty] Removed: {rmSid}");
                     return;
+                }
 
                 default:
                     Reply(caller, "[KGT/Bounty] Usage: /koh bounty [on|off|list|reload|add <steamId> <amount> [name]|remove <steamId>]");

@@ -30,6 +30,10 @@ namespace Si_KingOfTheHill
         // Tick gating — re-evaluate zone occupancy at this interval.
         static float _evalTimer = 0f;
 
+        // Time.time stamp of the current round's start. Used to gate time-locked
+        // purchases (Shrimp buy unlock). 0 = no round started yet (fail-open).
+        internal static float _roundStartTime = 0f;
+
         // === Operating mode helpers (read Cfg.Mode + Cfg.Enabled) ===
         // ModeKohActive  → full KoH gameplay (intro, capture, immunity, AntiBuild, rewards)
         // ModeBuyActive  → /buy command works (Mode 1 or 2)
@@ -150,6 +154,9 @@ namespace Si_KingOfTheHill
         static void OnGameStarted(GameMode mode)
         {
             if (!ModeAnyActive) return;  // Mode 3 (Disabled) or master toggle off
+
+            // Stamp round start for time-locked purchases (Shrimp unlock, etc.).
+            _roundStartTime = Time.time;
 
             // NOTE: do NOT ResetKohState() here. Silica's GameEvents.OnGameStarted fires
             // SEVERAL SECONDS after MusicJukeboxHandler.OnGameStarted (which is the hook

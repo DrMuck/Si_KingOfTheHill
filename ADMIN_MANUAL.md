@@ -59,7 +59,7 @@ You must be controlling a unit. Useful to see actual HP, damage, range, speed nu
 | `/back` | One level up in `/buy` |
 | `/0` | Close the `/buy` menu |
 
-Purchased units spawn ~15 m in front of you at ground level. Spawn is refused if it would land inside the configured no-build distance of an enemy HQ / Nest / Queen (configured via `BuyMinDistanceFromEnemyCritical`, typically ~400–800 m).
+Purchased units spawn ~15 m in front of you at ground level. Spawn is refused if it would land inside the configured no-build distance of an enemy HQ / Nest / Queen (configured via `BuyMinDistanceFromEnemyCritical`, typically ~400–800 m), or **further than `BuyMaxDistanceFromOwnCritical` (800 m default) from your own nearest HQ / Nest** — `/buy` reinforces your base, it doesn't teleport an army across the map.
 
 Credits come from three sources while you play:
 - **Starter credits** — flat grant once per round (server-configured; often a few thousand)
@@ -251,7 +251,7 @@ Available in modes 1 & 2. Anyone can use it unless `Cfg.BuyAdminOnly: true` is s
 | `/back` | Back to category list |
 | `/0` | Close menu |
 
-Units spawn ≈15 m in front of your controlled unit at ground level. Refused if too close to any enemy critical (HQ / Nest / Queen) — distance gate is `Cfg.BuyMinDistanceFromEnemyCritical`.
+Units spawn ≈15 m in front of your controlled unit at ground level. Refused if too close to any enemy critical (HQ / Nest / Queen) — distance gate is `Cfg.BuyMinDistanceFromEnemyCritical` — or too far from your own nearest HQ / Nest (`Cfg.BuyMaxDistanceFromOwnCritical`, 800 m default; 0 = unlimited). The own-base leash anchors on critical **structures** only, and is skipped entirely if your team owns none.
 
 ### Mode system
 

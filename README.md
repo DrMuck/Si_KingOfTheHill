@@ -29,6 +29,20 @@ Bundles a per-player **credit economy** (`/buy` menu, kill rewards, zone-presenc
 
 On first start the mod auto-creates `UserData/KingOfTheHill_cfg/Si_KingOfTheHill_Config.json` and `UserData/KingOfTheHill_cfg/Bounties.json` with sensible defaults.
 
+## Cross-mod credit API
+
+Other mods can pay KoH credits to a player (spendable in `/buy`) without a hard reference, by
+reflecting on `Si_KingOfTheHill.KingOfTheHill`:
+
+```csharp
+public static bool GrantExternalCredits(long steamId, int amount, string reason) // false while /buy is inactive (Mode 3 / Enabled=false)
+public static int  GetCreditsBySteamId(long steamId)
+```
+
+`steamId` is the Steam64 (`(long)player.PlayerID.m_ID`), the same key KoH uses internally. First
+consumer: [Si_Logistics](../Si_Logistics) pays a share of delivered Balterium to the transport driver.
+Declare `"King of the Galactic Teleport"` in `MelonOptionalDependencies` so KoH loads first.
+
 ## Operating modes
 
 Set via `Cfg.Mode` in JSON or live with `/koh mode N`:
@@ -85,7 +99,7 @@ These work for any connected player — no admin role required.
 | `/back` | Up one level in `/buy` |
 | `/0` | Close the `/buy` menu |
 
-Purchased units spawn ~15m in front of you at ground level. Refused if too close to an enemy critical (`Cfg.BuyMinDistanceFromEnemyCritical`).
+Purchased units spawn ~15m in front of you at ground level. Refused if too close to an enemy critical (`Cfg.BuyMinDistanceFromEnemyCritical`) or further than `Cfg.BuyMaxDistanceFromOwnCritical` (800m) from your own nearest HQ / Nest.
 
 ### How players earn credits
 

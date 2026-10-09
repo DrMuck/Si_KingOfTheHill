@@ -37,6 +37,7 @@
   "RewardResetOnGameEnd": true,
   "BuySpawnDistance": 15.0,
   "BuyMinDistanceFromEnemyCritical": 400.0,
+  "BuyMaxDistanceFromOwnCritical": 800.0,
   "CommanderRewardEnabled": true,
   "CommanderRewardMultiplier": 1.0,
   "HandicapEnabled": true,

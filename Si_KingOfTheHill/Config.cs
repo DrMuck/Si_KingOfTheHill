@@ -85,7 +85,12 @@ namespace Si_KingOfTheHill
             public bool  RewardZoneCrabSkipPenalty = true;           // crab's 0.25 scoring penalty doesn't apply to reward calc
             public bool  RewardResetOnGameEnd = true;                // wipe credits between rounds
             public float BuySpawnDistance = 15.0f;                   // metres in front of player to place purchased unit
-            public float BuyMinDistanceFromEnemyCritical = 400.0f;   // refuse purchase if spawn would land within this radius of any enemy HQ/Nest/Queen (0 = disabled)
+            public float BuyMinDistanceFromEnemyCritical = 400.0f;   // refuse purchase if spawn would land within this CYLINDRICAL (horizontal/radial, ignores altitude) radius of any enemy HQ/Nest/Queen (0 = disabled). Radial => can't buy in high orbit above an enemy HQ.
+            public float BuyMaxDistanceFromOwnCritical = 800.0f;     // refuse purchase if spawn would land FURTHER than this CYLINDRICAL radius from the player's nearest own HQ / Nest (0 = unlimited). Keeps /buy a base-reinforcement tool instead of a teleport-anywhere army. Fails open if the team owns no HQ/Nest.
+            public float ShrimpBuyUnlockSeconds = 600.0f;            // Shrimp units cannot be bought until this many seconds into the round (default 10 min). 0 = no time lock.
+            public float BuyCooldownSeconds = 240.0f;                // Anti-spam: after any /buy purchase, this many seconds must elapse before the same player can buy again (default 4 min). 0 = disabled.
+            public bool  StructureKillRewardsEnabled = true;         // when true, destroying an enemy building pays the killer credits (cost * RewardKillFraction). Toggle via /koh buildingreward on/off
+            public bool  BuyStructuresEnabled = false;               // when true, the /buy menu also lists buyable structures (Headquarters / factories / refineries / turrets). Toggle via /koh buystructures on/off
 
             // === Commander reward (per-tick, capped by MaxCapturePointsPerSecond) ===
             // Each tick, every team with units in the zone earns resources for its

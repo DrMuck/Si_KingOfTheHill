@@ -59,6 +59,69 @@ namespace Si_KingOfTheHill
         static readonly Dictionary<string, int> _unitCostVanilla = new Dictionary<string, int>();    // DisplayName -> vanilla cost (from dump; never mutated)
         static readonly Dictionary<string, string> _unitFaction = new Dictionary<string, string>(); // DisplayName -> "Sol"/"Centauri"/"Alien"
         static readonly Dictionary<string, string> _unitPrefab = new Dictionary<string, string>();  // DisplayName -> prefab name (internal minus "ObjectInfo_" prefix)
+        // Marks dump entries that are structures (is_structure: true). Used by /buy to
+        // exclude structures from the category list while still keeping their cost
+        // entries available for structure-kill reward lookups.
+        static readonly HashSet<string> _isStructure = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Parallel cost lookup by ObjectInfo.name (asset name, e.g.
+        // "ObjectInfo_Sol_HoverHarvester"). Needed because Si_UnitBalance's dump
+        // disambiguates faction-shared display names (e.g. both factions' harvesters
+        // are "Harvester" → dump stores "Sol Harvester" / "Cent Harvester") while at
+        // runtime ObjectInfo.DisplayName returns just "Harvester". Without this
+        // fallback, kill-reward / structure-kill-reward lookups on harvesters and HQs
+        // miss the dict and silently pay nothing.
+        static readonly Dictionary<string, int> _unitCostByInternal = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // Reverse map: dump display name -> raw internal asset name (e.g.
+        // "Sol Harvester" -> "ObjectInfo_Sol_HoverHarvester"). Used to keep
+        // _unitCostByInternal in sync when ApplyUnitBalanceCostOverrides scales costs.
+        static readonly Dictionary<string, string> _internalByDisplay = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // Faction-aware structure catalog for the /buy "Buildings" menu. Built one entry
+        // per dump ROW (NOT keyed by display name) because Sol and Centauri structures
+        // share display names — "Barracks", "Air Factory", "Refinery", turrets, etc. A
+        // display-keyed dict silently drops the duplicate, so the faction whose row is
+        // written last (Sol) wins and the other faction (Centauri) is left with only its
+        // uniquely-named HQ. Units don't collide, so they keep using the dicts above.
+        // Cost stays faction-independent (looked up from _unitCost by display name); only
+        // the PREFAB must be carried per-row so the correct faction variant spawns.
+        internal class StructRow
+        {
+            public string Display    = "";   // e.g. "Barracks"
+            public string Prefab     = "";   // name hint for the spawn DB, e.g. "Cent_Barracks"
+            public string Faction    = "";   // "Sol" / "Centauri" / "Alien"
+            public string ObjectInfo = "";   // dump "internal" (e.g. "ObjectInfo_Alien_Nest") — authoritative prefab key
+        }
+        static readonly List<StructRow> _structRows = new List<StructRow>();
+
+        /// <summary>
+        /// Look up a unit/structure's effective cost using its ObjectInfo. Tries the
+        /// display name first (matches dump entries for most units), falls back to the
+        /// asset name (handles harvesters / HQs whose DisplayName collides between
+        /// factions and where the dump used a disambiguated label). Returns false if
+        /// neither key resolves.
+        /// </summary>
+        public static bool TryGetEffectiveCost(ObjectInfo? info, out int cost, out string lookupKey)
+        {
+            cost = 0;
+            lookupKey = "";
+            if (info == null) return false;
+
+            string displayName = info.DisplayName ?? "";
+            if (!string.IsNullOrEmpty(displayName) && _unitCost.TryGetValue(displayName, out cost) && cost > 0)
+            {
+                lookupKey = displayName;
+                return true;
+            }
+
+            string assetName = info.name ?? "";
+            if (!string.IsNullOrEmpty(assetName) && _unitCostByInternal.TryGetValue(assetName, out cost) && cost > 0)
+            {
+                lookupKey = displayName.Length > 0 ? displayName : assetName;
+                return true;
+            }
+
+            return false;
+        }
         static bool _dumpLoaded;
 
         static void LoadUnitDump()
@@ -84,17 +147,19 @@ namespace Si_KingOfTheHill
                 // Iterate JToken directly — casting to JArray trips the netstandard2.1 /
                 // net472 Newtonsoft.Json type resolution (ICloneable / IBindingList interfaces).
                 int count = 0;
-                int skippedStructures = 0;
+                int structuresFlagged = 0;
                 foreach (var u in unitsToken)
                 {
                     string? name = u["name"]?.ToString();
                     if (string.IsNullOrEmpty(name)) continue;
 
-                    // Skip structures — they appear in the dump alongside units (e.g.
-                    // "Air Factory" with built_at="Headquarters") and would otherwise
-                    // pollute the /buy menu's category list with non-unit options.
+                    // Mark structures so /buy can filter them out of the category list
+                    // (otherwise factories under Headquarters / Quantum Cortex / Research
+                    // Facility pollute the player-facing buyable list). We still load
+                    // them into the cost dict so the structure-kill reward handler can
+                    // look up a price.
                     bool isStructure = u["is_structure"]?.Value<bool>() ?? false;
-                    if (isStructure) { skippedStructures++; continue; }
+                    if (isStructure) { _isStructure.Add(name!); structuresFlagged++; }
 
                     _unitToBuilding[name!] = u["built_at"]?.ToString() ?? "";
                     int vanillaCost = u["cost"]?.Value<int>() ?? 0;
@@ -102,24 +167,45 @@ namespace Si_KingOfTheHill
                     _unitCost[name!] = vanillaCost;  // overlay applied in ApplyUnitBalanceCostOverrides
                     _unitFaction[name!] = u["faction"]?.ToString() ?? "";
 
-                    // Derive prefab name from "internal" (ObjectInfo asset name).
+                    // Parallel by-internal-name lookup — see _unitCostByInternal field comment.
+                    string rawInternal = u["internal"]?.ToString() ?? "";
+                    if (!string.IsNullOrEmpty(rawInternal))
+                    {
+                        _unitCostByInternal[rawInternal] = vanillaCost;
+                        _internalByDisplay[name!] = rawInternal;
+                    }
+
+                    // Best-effort prefab NAME derived from "internal" (ObjectInfo asset name).
                     //   Sol_Soldier_Heavy  → game DB key "Sol_Soldier_Heavy"      (humans keep prefix)
-                    //   Alien_Scorpion     → game DB key "Scorpion"               (aliens DROP prefix)
-                    // Alien creature prefabs are registered in GameDatabase without
-                    // the "Alien_" faction prefix (confirmed by Timer.cs finishing-force
-                    // constants like PREFAB_GOLIATH = "Goliath"). Without this strip,
-                    // /buy fails on every alien purchase with "Prefab 'Alien_X' not in
-                    // spawnable database".
+                    //   Alien_Scorpion     → game DB key "Scorpion"               (creatures DROP prefix)
+                    // This is only a FALLBACK hint now — no single string rule maps ObjectInfo
+                    // names onto prefab names (alien STRUCTURES keep the prefix: "Alien_Nest";
+                    // "Alien_CrabHorned" is prefab "Crab_Horned"; "FusionReactor" is
+                    // "FusionReactor_01"). /buy resolves prefabs through ObjectInfo.Prefab
+                    // instead — see ResolveBuyPrefab in Buy.cs — and falls back to this name.
                     string internalName = u["internal"]?.ToString() ?? "";
                     if (internalName.StartsWith("ObjectInfo_"))
                         internalName = internalName.Substring("ObjectInfo_".Length);
-                    if (internalName.StartsWith("Alien_"))
+                    if (internalName.StartsWith("Alien_") && !isStructure)
                         internalName = internalName.Substring("Alien_".Length);
                     _unitPrefab[name!] = internalName;
 
+                    // Faction-aware structure catalog (see _structRows comment). One row
+                    // per structure so Sol/Centauri same-named buildings don't collide.
+                    if (isStructure)
+                    {
+                        _structRows.Add(new StructRow
+                        {
+                            Display    = name!,
+                            Prefab     = internalName,
+                            Faction    = u["faction"]?.ToString() ?? "",
+                            ObjectInfo = rawInternal,
+                        });
+                    }
+
                     count++;
                 }
-                MelonLogger.Msg($"[KGT] Loaded {count} units from dump ({skippedStructures} structures skipped)");
+                MelonLogger.Msg($"[KGT] Loaded {count} dump entries ({structuresFlagged} marked as structures — included for kill rewards, hidden from /buy)");
             }
             catch (Exception ex)
             {
@@ -194,6 +280,11 @@ namespace Si_KingOfTheHill
                     if (modded != vanilla)
                     {
                         _unitCost[unitName] = modded;
+                        // Mirror into by-internal map so the runtime fallback lookup
+                        // (used for harvesters / HQs where DisplayName collides) also
+                        // sees the scaled cost.
+                        if (_internalByDisplay.TryGetValue(unitName, out string rawInternal))
+                            _unitCostByInternal[rawInternal] = modded;
                         touched++;
                     }
                 }

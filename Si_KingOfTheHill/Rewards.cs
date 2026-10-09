@@ -48,6 +48,23 @@ namespace Si_KingOfTheHill
             _playerCredits[steamId] = now;
         }
 
+        // ----- Cross-mod API (reflection-friendly) -----
+        // Other mods (e.g. Si_Logistics delivery bonus) call this via reflection:
+        //   asm.GetType("Si_KingOfTheHill.KingOfTheHill")
+        //      .GetMethod("GrantExternalCredits", Public|Static, null, new[]{typeof(long),typeof(int),typeof(string)}, null)
+        // Primitive parameters keep the reflected signature independent of game types.
+        // Returns false (and credits nothing) while the /buy economy is inactive (Mode 3 or Cfg.Enabled = false).
+        public static bool GrantExternalCredits(long steamId, int amount, string reason)
+        {
+            if (!ModeBuyActive || steamId == 0 || amount <= 0) return false;
+            AddCredits(steamId, amount);
+            MelonLogger.Msg($"[KGT] +{amount}cr -> {steamId} ({reason ?? "external"}). Total: {GetCredits(steamId)}cr");
+            return true;
+        }
+
+        public static int GetCreditsBySteamId(long steamId)
+            => ModeBuyActive ? GetCredits(steamId) : 0;
+
         static long GetPlayerSteamId(Player p)
         {
             // NetworkID has m_ID (ulong) — same as the Steam ID bits.
@@ -145,8 +162,7 @@ namespace Si_KingOfTheHill
                 // *enemy* team — we use Silica's enemy check for clarity).
                 if (unit.Team != null && killer.Team != null && unit.Team == killer.Team) return;
 
-                string victimName = unit.ObjectInfo.DisplayName ?? "";
-                if (!_unitCost.TryGetValue(victimName, out int cost) || cost <= 0) return;
+                if (!TryGetEffectiveCost(unit.ObjectInfo, out int cost, out string victimName)) return;
 
                 int reward = Mathf.RoundToInt(cost * Cfg.RewardKillFraction);
                 if (reward <= 0) return;
@@ -175,7 +191,7 @@ namespace Si_KingOfTheHill
         {
             try
             {
-                if (!ModeBuyActive || structure == null || structure.ObjectInfo == null || instigator == null) return;
+                if (!ModeBuyActive || !Cfg.StructureKillRewardsEnabled || structure == null || structure.ObjectInfo == null || instigator == null) return;
 
                 BaseGameObject? attacker = GameFuncs.GetBaseGameObject(instigator);
                 Player? killer = attacker?.NetworkComponent?.OwnerPlayer;
@@ -184,8 +200,7 @@ namespace Si_KingOfTheHill
                 // No reward for destroying own/allied structure.
                 if (structure.Team != null && killer.Team != null && structure.Team == killer.Team) return;
 
-                string victimName = structure.ObjectInfo.DisplayName ?? "";
-                if (!_unitCost.TryGetValue(victimName, out int cost) || cost <= 0) return;
+                if (!TryGetEffectiveCost(structure.ObjectInfo, out int cost, out string victimName)) return;
 
                 int reward = Mathf.RoundToInt(cost * Cfg.RewardKillFraction);
                 if (reward <= 0) return;

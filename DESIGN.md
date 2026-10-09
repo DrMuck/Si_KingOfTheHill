@@ -195,6 +195,8 @@ Credits live in `Dictionary<long /*SteamID*/, int>`. Reset between rounds when `
 - Must be **controlling a unit** (refused otherwise — that's the spawn anchor).
 - Spawn position = `Cfg.BuySpawnDistance` (15m) in front of player's controlled unit's facing.
 - Refused if spawn would land within `Cfg.BuyMinDistanceFromEnemyCritical` (400m default) of any enemy HQ / Nest / Queen — anti-rush guard. Checks both `team.Structures` and `team.Units` with `ObjectInfo.Critical == true`.
+- Refused if spawn would land further than `Cfg.BuyMaxDistanceFromOwnCritical` (800m default, 0 = unlimited) from the nearest own critical **structure** (HQ / Nest) — base leash. Structures only: the alien Queen is critical but mobile, and would otherwise carry the buy zone around the map. Fails **open** if the team owns no critical structure, so losing your last nest doesn't also lock you out of `/buy`. Same cylindrical (XZ) distance as the enemy gate.
+- The `/buy` unit list warns up front when the player is already standing outside the leash.
 - Unit appears on **player's team** (passed to `Game.SpawnPrefab` so it's baked into the SendNetSpawn packet — see [[project_silica_team_networking]] memory).
 
 ---
@@ -263,6 +265,7 @@ Key sections (full schema in `Config.cs`):
   "RewardResetOnGameEnd": true,
   "BuySpawnDistance": 15.0,
   "BuyMinDistanceFromEnemyCritical": 400.0,
+  "BuyMaxDistanceFromOwnCritical": 800.0,
 
   "WinFinishingForceDelaySeconds": 4.0,
   "SoundFirstCapture": "sounds/first_capture.wav",
