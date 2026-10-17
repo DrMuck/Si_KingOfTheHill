@@ -6,7 +6,8 @@ Type commands into normal chat. Anything that starts with `/` is a hidden comman
 
 | Mod | Player commands |
 |--|--|
-| [Si_KingOfTheHill](#si_kingofthehill-kgt) | `/koh`, `/buy` |
+| [Si_KingOfTheHill](#si_kingofthehill-kgt) | `/koh` |
+| [Si_Buy](#si_buy-credit-economy) | `/buy` |
 | [Si_UnitBalance](#si_unitbalance) | `/stats` |
 | [Si_HeavyTeleporter](#si_heavyteleporter) | `/st` |
 | [Si_CrabCannon](#si_crabcannon) | `/ccaim` *(when allowed by admin)* |
@@ -21,7 +22,7 @@ A ring of 12 outposts marks the capture perimeter. As the leading team accumulat
 
 The size of the capture zone and the no-build radius around it are **map-dependent** (configured per map by the server). The zone you see on one map may be tighter or wider on the next.
 
-Alongside the capture game, KGT runs a **per-player credit economy**: you earn credits, you spend them with `/buy` to instantly reinforce wherever you're standing.
+While one of your units is inside the capture zone you earn **personal credits** every second, paid into the [Si_Buy](#si_buy-credit-economy) economy — spend them with `/buy`.
 
 ### Capture status
 
@@ -29,6 +30,16 @@ Alongside the capture game, KGT runs a **per-player credit economy**: you earn c
 |--|--|
 | `/koh` | Show live status: current king team, capture % progress, last tick gain, per-team handicap multipliers |
 | `/koh status` | Same as above |
+
+### Anti-build inside the zone
+
+If you try to construct a structure inside the visible exclusion radius around the Galactic Teleporter, the server will reject it and warn the team. Build outside the ring.
+
+---
+
+## Si_Buy (credit economy)
+
+The server runs a **per-player credit economy** ([Si_Buy](https://github.com/DrMuck/Si_Buy)): you earn credits, you spend them with `/buy` to instantly reinforce wherever you're standing. Purchases must land within your own base's reach (near one of your HQs / Nests) and away from enemy criticals; Shrimps unlock a few minutes into the round and there is a short cooldown between purchases.
 
 ### Buy menu
 
@@ -50,13 +61,13 @@ Three sources run in parallel:
 
 1. **Starter credits** — flat amount granted once per round when you connect. Server-configured (commonly a few thousand cr).
 2. **Kill rewards** — when you destroy an enemy unit or structure, you receive a percentage of its cost (default 20%). Works for direct kills and structure demolitions.
-3. **Zone presence** — while one of your units is inside the capture zone, you receive a per-second tick proportional to the unit's cap value (only active in the full KoH mode).
+3. **Zone presence** — (Si_KingOfTheHill) while one of your units is inside the capture zone, you receive a per-second tick proportional to the unit's cap value.
+4. **Headhunter bounty** — killing a player on the server's bounty list pays a bonus on top of the kill reward.
+5. **Other mods** — Si_Logistics pays transport drivers a share of delivered Balterium.
 
-The commander's **faction treasury** also earns credits per-tick while team units are in the zone (with a handicap multiplier favouring the trailing team). That's separate from your personal `/buy` credits.
+The commander's **faction treasury** also earns resources per tick while team units are in the KoH zone (Si_KingOfTheHill, with a handicap multiplier favouring the trailing team). That's separate from your personal `/buy` credits.
 
-### Anti-build inside the zone
-
-If you try to construct a structure inside the visible exclusion radius around the Galactic Teleporter, the server will reject it and warn the team. Build outside the ring.
+`/buy status` shows the economy state and your balance.
 
 ---
 

@@ -7,7 +7,8 @@ Covers the four DrMuck mods loaded on this server:
 | [Si_CrabCannon](#si_crabcannon) | `/cc` |
 | [Si_HeavyTeleporter](#si_heavyteleporter) | `/st` |
 | [Si_UnitBalance + UI](#si_unitbalance) | `!rebalance`, `!b`, `/stats` |
-| [Si_KingOfTheHill](#si_kingofthehill-kgt) | `/koh`, `/buy` |
+| [Si_KingOfTheHill](#si_kingofthehill-kgt) | `/koh` |
+| [Si_Buy](https://github.com/DrMuck/Si_Buy) | `/buy` (economy, own manual in that repo) |
 
 All "admin" commands gate on **SilicaAdminMod's `CanAdminExecute(Power.Generic)`** — you need at least the `Generic` power in `admins.json`. Player commands work for everyone.
 
@@ -47,24 +48,14 @@ Requirements: your team's tech tier must be at least the configured threshold, a
 
 You must be controlling a unit. Useful to see actual HP, damage, range, speed numbers (which can differ from vanilla because of live balance overrides).
 
-### From Si_KingOfTheHill — capture status + unit purchase
+### From Si_KingOfTheHill — capture status
 
 | Command | What it does |
 |--|--|
 | `/koh` | Live status — current king team, capture % progress, last tick gain, per-team handicap multipliers |
 | `/koh status` | Same as above |
-| `/buy` | Open the unit-purchase menu (modes 1 & 2; falls back to *"disabled"* in mode 3 or if the server enabled `BuyAdminOnly`). Categories listed; pick with `/1`–`/N` |
-| `/buy <N>` | Pick category or unit N directly |
-| `/1`–`/N` | Navigate the current `/buy` menu level |
-| `/back` | One level up in `/buy` |
-| `/0` | Close the `/buy` menu |
 
-Purchased units spawn ~15 m in front of you at ground level. Spawn is refused if it would land inside the configured no-build distance of an enemy HQ / Nest / Queen (configured via `BuyMinDistanceFromEnemyCritical`, typically ~400–800 m), or **further than `BuyMaxDistanceFromOwnCritical` (800 m default) from your own nearest HQ / Nest** — `/buy` reinforces your base, it doesn't teleport an army across the map.
-
-Credits come from three sources while you play:
-- **Starter credits** — flat grant once per round (server-configured; often a few thousand)
-- **Kill rewards** — a percentage of the victim unit / structure's cost goes to the killer
-- **Zone presence** — if KGT is in full mode (Mode 1) you accrue credits per second while one of your units is inside the capture zone
+`/buy` and the credit economy moved to [Si_Buy](https://github.com/DrMuck/Si_Buy) (`/buy status` for the state and your balance, `/buy give`, `/buy starter`, `/buy bounty ...` for admins). KGT only pays the **zone-presence** credits into it while one of your units sits inside the capture zone.
 
 ---
 
@@ -214,13 +205,9 @@ Recommended setting: **`true`**.
 
 The headline **"King of the Galactic Teleport"** game-mode layer. Drops a neutral capture point (an UltraHeavyFactory built by the Wildlife team, configured per map via Si_MapBalance) somewhere on the map. The first team to push enough weighted unit-cap into the capture cylinder and hold dominance for long enough wins the round — even without destroying the enemy HQ. Capture progress is visualized live by a ring of 12 outposts that fill in the leading team's faction colour.
 
-KGT also bundles a **per-player credit economy** (`/buy` menu, kill rewards, zone-presence ticks, faction-treasury commander rewards) and an anti-snowball **handicap multiplier** so a dominant team's commander reward shrinks while a trailing team's grows.
+KGT also rewards the commander's **faction treasury** per tick, with an anti-snowball **handicap multiplier** so a dominant team's commander reward shrinks while a trailing team's grows, and pays players **zone-presence credits** into [Si_Buy](https://github.com/DrMuck/Si_Buy) when that mod is installed.
 
-Has two chat surfaces:
-- **`/koh`** — admin configuration + live status (status itself is player-visible)
-- **`/buy`** — in-round unit purchase menu, available to any player (configurable to admin-only)
-
-A three-tier **Mode system** lets you run the full KGT experience, only the `/buy` economy, or disable everything per round.
+One chat surface: **`/koh`** — admin configuration + live status (status itself is player-visible). The `/buy` economy is Si_Buy since KGT 0.5.0.
 
 > **Per-map radii**: `CaptureRadius` and `ExclusionRadius` (the no-build zone) are normally **defined in the MapBalance spawn config** — the `koh` block of `UserData/Spawns/<MapName>/koh_*.json`. KGT reads them from MapBalance at round start; the matching `Cfg.CaptureRadius` / `Cfg.BuildExclusionRadius` fields in `Si_KingOfTheHill_Config.json` act only as fallbacks when the spawn config doesn't provide a value. **To change a map's capture/no-build radius, edit that map's MapBalance JSON, not the KGT config.**
 
@@ -230,42 +217,18 @@ A three-tier **Mode system** lets you run the full KGT experience, only the `/bu
 
 | Command | What it does |
 |--|--|
-| `/koh` or `/koh status` | One-line summary: ON/OFF, mode, capture radius, exclusion radius, king + progress, last tick gain/cap, per-team handicap multipliers |
+| `/koh` or `/koh status` | One-line summary: ON/OFF, Si_Buy link, capture radius, exclusion radius, king + progress, last tick gain/cap, per-team handicap multipliers |
 | `/koh on` / `/koh off` | Master toggle (`Cfg.Enabled`) |
-| `/koh mode <1\|2\|3>` | Operating mode (see [§ Mode system](#mode-system)) |
-| `/koh starter <N>` | Set `StarterCreditsPerPlayer` — credits granted to each player once per round (modes 1 & 2 only). `0` disables |
 | `/koh radius <m>` | Capture-zone radius |
 | `/koh threshold <pts>` | Win threshold (points to win) |
 | `/koh rate <pts/s>` | `MaxCapturePointsPerSecond` cap |
 | `/koh reset` | Clear king + accumulation + milestones for the current round (doesn't end the round) |
 
-### `/buy` — in-round unit purchase
+### Enabling / disabling
 
-Available in modes 1 & 2. Anyone can use it unless `Cfg.BuyAdminOnly: true` is set.
+`/koh off` (or `Enabled: false`) switches the whole KoH game off; MapBalance is then told KGT doesn't want KoH layouts (`IsKohModeActive()` reflects `ModeKohActive` → false), so the map picker skips `koh_*` JSONs even though KGT is loaded. Pre-0.5.0 configs with `Mode` 2 or 3 load as `Enabled=false`; the economy part of the old Mode 2 is Si_Buy's own `/buy on|off`.
 
-| Command | What it does |
-|--|--|
-| `/buy` | Open buy menu. Shows categories: Barracks, Light Factory, Heavy Factory, Ultra Heavy Factory, Air Factory (humans) — or Lesser/Greater/Grand/Colossal Spawning Cyst (alien) |
-| `/buy <N>` | Pick category N (or unit N once in a sub-list) |
-| `/1`–`/N` | Same as `/buy N` while the menu is open |
-| `/back` | Back to category list |
-| `/0` | Close menu |
-
-Units spawn ≈15 m in front of your controlled unit at ground level. Refused if too close to any enemy critical (HQ / Nest / Queen) — distance gate is `Cfg.BuyMinDistanceFromEnemyCritical` — or too far from your own nearest HQ / Nest (`Cfg.BuyMaxDistanceFromOwnCritical`, 800 m default; 0 = unlimited). The own-base leash anchors on critical **structures** only, and is skipped entirely if your team owns none.
-
-### Mode system
-
-`Cfg.Mode` (1 / 2 / 3) — change via `/koh mode N`:
-
-| Mode | Intro chat + voice | KoH spawn / capture / immunity | AntiBuild zone | `/buy` | Kill rewards | Zone-presence reward | Commander reward | Starter credits |
-|--|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| **1 Full** (default) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **2 BuyOnly** | — | — | — | ✅ | ✅ | — | — | ✅ |
-| **3 Disabled** | — | — | — | — | — | — | — | — |
-
-In **Mode 2**, `MapBalance` is told KGT doesn't want KoH layouts (`IsKohModLoaded()` reflects `ModeKohActive` → false), so the map picker skips `koh_*` JSONs even though KGT is loaded.
-
-Mode changes take effect at the next round start.
+Changes take effect at the next round start.
 
 ---
 
@@ -346,16 +309,12 @@ Outpost ring fill: `kingN = round(OutpostCount × king_progress / threshold)` �
 
 ### Reward systems
 
-Three orthogonal credit sources running in parallel:
+Two reward paths run from KGT itself; kill rewards, starter credits and bounties are [Si_Buy](https://github.com/DrMuck/Si_Buy)'s.
 
-| Source | Beneficiary | Formula | Modes |
-|--|--|--|--|
-| **Kill reward** | Killing player | `round(victim.cost × Cfg.RewardKillFraction)` per kill (units AND structures) | 1, 2 |
-| **Zone-presence reward** | Player whose unit is in zone | `round(EvalIntervalSeconds × unit.cap × Cfg.RewardZonePresenceMultiplier)` per tick per controlled unit | 1 only |
-| **Commander reward** | Faction treasury | `round(min(team_score, MaxCapturePointsPerSecond × dt) × Cfg.CommanderRewardMultiplier × handicap_mult)` per tick per team. Goes via `Team.StoreResource` (overflow → `Team.StartingResources`) | 1 only |
-| **Starter credits** | Player | Flat `Cfg.StarterCreditsPerPlayer` granted once per round at game start (+ 5 s poll for late joiners) | 1, 2 |
-
-**Costs honor live `Si_UnitBalance` `cost_mult`** — KGT reads `Si_UnitBalance_Config.json` directly at each round start and multiplies the vanilla dump cost by the per-unit `cost_mult` field. (Reading `ConstructionData.ResourceCost` would return vanilla because UnitBalance's OverrideManager is a runtime overlay, not a field mutation.)
+| Source | Beneficiary | Formula |
+|--|--|--|
+| **Zone-presence reward** | Player whose unit is in zone | `round(EvalIntervalSeconds × unit.cap × Cfg.RewardZonePresenceMultiplier)` per tick per controlled unit, paid via `Si_Buy.Buy.GrantExternalCredits` (no-op without Si_Buy) |
+| **Commander reward** | Faction treasury | `round(min(team_score, MaxCapturePointsPerSecond × dt) × Cfg.CommanderRewardMultiplier × handicap_mult)` per tick per team. Goes via `Team.StoreResource` (overflow → `Team.StartingResources`) |
 
 ### Commander-reward handicap (anti-snowball)
 
@@ -371,7 +330,7 @@ Defaults give: dominant team at 2× avg → 0.50× reward; trailing team at 0.5�
 
 ### What MapBalance does for KGT specifically
 
-1. **Layout selection bias** — `Si_MapBalance.IsKohModLoaded()` reflect-calls `Si_KingOfTheHill.KingOfTheHill.ModeKohActive`. When `true`, the layout picker prefers JSONs that carry a `koh` block. When `false` (Mode 2 / 3), the picker treats KGT as not loaded.
+1. **Layout selection bias** — `Si_MapBalance.IsKohModLoaded()` reflect-calls `Si_KingOfTheHill.KingOfTheHill.ModeKohActive`. When `true`, the layout picker prefers JSONs that carry a `koh` block. When `false` (`Enabled: false`), the picker treats KGT as not loaded.
 2. **Per-map spawn data** — `koh.PrefabName`, `koh.Position`, `koh.Team`, `koh.CaptureRadius`, `koh.ExclusionRadius` all live in the spawn-config JSON under `UserData/Spawns/<MapName>/koh_*.json`. Tune them per map.
 3. **The publish handoff** — MapBalance writes `MapBalanceSpecials.Koh = { Obj, CaptureRadius, ExclusionRadius }` after spawning and fires `OnSpecialsReady`. KGT's only knowledge of *where* the capture point is comes from that public field.
 

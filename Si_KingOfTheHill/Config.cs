@@ -1,5 +1,6 @@
 using MelonLoader;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -11,29 +12,11 @@ namespace Si_KingOfTheHill
         // === Config model — mirrors §9 of DESIGN.md ===
         public class KohConfig
         {
+            // Master switch for the KoH game (intro, capture zone, tower immunity,
+            // AntiBuild, commander reward). The credit economy is Si_Buy's own switch.
+            // Old configs: Mode 1 → Enabled, Mode 2 (BuyOnly) / 3 (Disabled) → Enabled=false.
             public bool Enabled = true;
             public bool OnlyInStrategyMode = true;
-
-            // Operating mode (gates which mod subsystems run):
-            //   1 = Full KoH  → intro, capture zone, building protection, AntiBuild, /buy, rewards (default)
-            //   2 = BuyOnly   → no intro, no capture zone, no KoH spawn / immunity / AntiBuild.
-            //                   /buy still works, kill rewards still fire, starter credits granted.
-            //   3 = Disabled  → mod loads but every subsystem is inert.
-            // Change at runtime with `/koh mode <N>` (admin only).
-            public int Mode = 1;
-
-            // Starter credits granted to each player once per round (modes 1 & 2 only).
-            // 0 disables. Players joining mid-round receive the grant on connect.
-            public int StarterCreditsPerPlayer = 0;
-
-            // When true, /buy is restricted to admins (anyone who passes
-            // SilicaAdminMod's CanAdminExecute check). Default false = everyone can /buy.
-            public bool BuyAdminOnly = false;
-
-            // Master switch for the headhunter bounty system. When false, no announcements
-            // fire and no kill payouts are made (even if Bounties.json has entries).
-            // Default true so a populated Bounties.json "just works" out of the box.
-            public bool BountiesEnabled = true;
 
             // Note: the KoH prefab is owned by Si_MapBalance (its KohEntry.PrefabName field).
             // KGT just consumes the spawned GameObject via MapBalanceSpecials.Koh.
@@ -78,19 +61,13 @@ namespace Si_KingOfTheHill
             public bool EnterExitNotifications = true;
             public float StatusAnnounceIntervalSeconds = 60.0f;
 
-            // === Reward system (v0.3.0) ===
-            // Per-player credits earned from kills + presence in zone, spent via /buy.
-            public float RewardKillFraction = 0.10f;                 // killer gets this % of victim's initial cost
+            // === Zone-presence player reward ===
+            // Each tick a player controlling a unit inside the zone earns
+            // round(EvalIntervalSeconds * unit_cap * RewardZonePresenceMultiplier) credits,
+            // paid into Si_Buy's ledger when that mod is installed (0 = off).
+            // Kill rewards, starter credits, bounties and the /buy rules are Si_Buy config.
             public float RewardZonePresenceMultiplier = 2.0f;        // tick * unit_cap * this = credits per tick
             public bool  RewardZoneCrabSkipPenalty = true;           // crab's 0.25 scoring penalty doesn't apply to reward calc
-            public bool  RewardResetOnGameEnd = true;                // wipe credits between rounds
-            public float BuySpawnDistance = 15.0f;                   // metres in front of player to place purchased unit
-            public float BuyMinDistanceFromEnemyCritical = 400.0f;   // refuse purchase if spawn would land within this CYLINDRICAL (horizontal/radial, ignores altitude) radius of any enemy HQ/Nest/Queen (0 = disabled). Radial => can't buy in high orbit above an enemy HQ.
-            public float BuyMaxDistanceFromOwnCritical = 800.0f;     // refuse purchase if spawn would land FURTHER than this CYLINDRICAL radius from the player's nearest own HQ / Nest (0 = unlimited). Keeps /buy a base-reinforcement tool instead of a teleport-anywhere army. Fails open if the team owns no HQ/Nest.
-            public float ShrimpBuyUnlockSeconds = 600.0f;            // Shrimp units cannot be bought until this many seconds into the round (default 10 min). 0 = no time lock.
-            public float BuyCooldownSeconds = 240.0f;                // Anti-spam: after any /buy purchase, this many seconds must elapse before the same player can buy again (default 4 min). 0 = disabled.
-            public bool  StructureKillRewardsEnabled = true;         // when true, destroying an enemy building pays the killer credits (cost * RewardKillFraction). Toggle via /koh buildingreward on/off
-            public bool  BuyStructuresEnabled = false;               // when true, the /buy menu also lists buyable structures (Headquarters / factories / refineries / turrets). Toggle via /koh buystructures on/off
 
             // === Commander reward (per-tick, capped by MaxCapturePointsPerSecond) ===
             // Each tick, every team with units in the zone earns resources for its
@@ -211,11 +188,24 @@ namespace Si_KingOfTheHill
             {
                 if (File.Exists(_configPath))
                 {
-                    var loaded = JsonConvert.DeserializeObject<KohConfig>(File.ReadAllText(_configPath));
+                    string json = File.ReadAllText(_configPath);
+                    var loaded = JsonConvert.DeserializeObject<KohConfig>(json);
                     if (loaded != null)
                     {
                         Cfg = loaded;
                         MelonLogger.Msg("[KGT] Config loaded from " + _configPath);
+                        // Pre-0.5.0 configs carried Mode (1 Full / 2 BuyOnly / 3 Disabled).
+                        // Only Mode 1 ran the KoH game; the economy part is Si_Buy's now.
+                        try
+                        {
+                            var mode = Newtonsoft.Json.Linq.JObject.Parse(json)["Mode"];
+                            if (mode != null && mode.Value<int>() != 1 && Cfg.Enabled)
+                            {
+                                Cfg.Enabled = false;
+                                MelonLogger.Msg($"[KGT] Legacy Mode={mode.Value<int>()} → Enabled=false (KoH game off; /buy economy is Si_Buy's switch now)");
+                            }
+                        }
+                        catch { }
                         // Re-save so newly-added fields appear in the JSON for tuning. Preserves
                         // user-customised values (Newtonsoft only overwrites fields it parsed).
                         SaveConfig();

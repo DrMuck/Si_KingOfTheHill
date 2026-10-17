@@ -1,10 +1,14 @@
 /*
- Si_KingOfTheHill - v0.1.0 (scaffold)
+ Si_KingOfTheHill - King of the Galactic Teleport (KGT)
 
  3-team King of the Hill mode for Silica. A neutral tower in the middle of the
  map is captured by whichever team holds the highest weighted unit count inside
  a cylindrical zone. When the global capture timer expires, the current king
  wins the round.
+
+ Since v0.5.0 the credit economy (/buy, kill rewards, bounties, starter credits)
+ is the separate mod Si_Buy. KGT pays zone-presence credits through its public
+ API when it is installed (see BuyBridge.cs) and runs without it otherwise.
 
  See DESIGN.md (in repo root) for full spec.
 
@@ -19,7 +23,7 @@ using System;
 using System.IO;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(Si_KingOfTheHill.KingOfTheHill), "King of the Galactic Teleport", "0.3.0", "DrMuck")]
+[assembly: MelonInfo(typeof(Si_KingOfTheHill.KingOfTheHill), "King of the Galactic Teleport", "0.5.0", "DrMuck")]
 [assembly: MelonGame("Bohemia Interactive", "Silica")]
 [assembly: MelonOptionalDependencies("Admin Mod", "Si_UnitBalance")]
 
@@ -30,24 +34,10 @@ namespace Si_KingOfTheHill
         // Tick gating — re-evaluate zone occupancy at this interval.
         static float _evalTimer = 0f;
 
-        // Time.time stamp of the current round's start. Used to gate time-locked
-        // purchases (Shrimp buy unlock). 0 = no round started yet (fail-open).
-        internal static float _roundStartTime = 0f;
-
-        // === Operating mode helpers (read Cfg.Mode + Cfg.Enabled) ===
-        // ModeKohActive  → full KoH gameplay (intro, capture, immunity, AntiBuild, rewards)
-        // ModeBuyActive  → /buy command works (Mode 1 or 2)
-        // ModeAnyActive  → any subsystem allowed (Mode 1, 2, or anything other than Disabled)
-        public static bool ModeKohActive => Cfg != null && Cfg.Enabled && Cfg.Mode == 1;
-        public static bool ModeBuyActive => Cfg != null && Cfg.Enabled && (Cfg.Mode == 1 || Cfg.Mode == 2);
-        public static bool ModeAnyActive => Cfg != null && Cfg.Enabled && Cfg.Mode != 3;
-
-        // Starter credits tracking (per Steam ID, per round). Cleared on game end.
-        static readonly System.Collections.Generic.HashSet<long> _starterCreditsGranted
-            = new System.Collections.Generic.HashSet<long>();
-        // Periodic check timer for granting starter credits to mid-round joiners.
-        static float _starterCreditsCheckTimer = 0f;
-        const float STARTER_CREDITS_CHECK_INTERVAL = 5.0f;
+        // KoH gameplay switch (intro, capture, immunity, AntiBuild, commander reward).
+        // Si_MapBalance reflect-probes this property to decide whether to prefer
+        // layouts with a 'koh' block — keep the name.
+        public static bool ModeKohActive => Cfg != null && Cfg.Enabled;
 
         // Startup-grace window after each game start. If no KoH has been registered
         // (i.e. Si_MapBalance didn't spawn one because the active spawn config has
@@ -84,7 +74,7 @@ namespace Si_KingOfTheHill
                 new (string, float)[] { ("sounds/intro_05a.wav", 5.16f), ("sounds/intro_05b.wav", 4.13f) }),
             ("[KGT] <color=#ffcc00>Player reward:</color> earn personal credits for kills and for time spent in the zone.",
                 new (string, float)[] { ("sounds/intro_06a.wav", 4.90f), ("sounds/intro_06b.wav", 2.66f) }),
-            ("[KGT] Use <color=#39ff14>/buy</color> to spend credits on units. Type <color=#39ff14>/koh</color> for live capture status.",
+            ("[KGT] Use <color=#39ff14>/buy</color> to spend credits on units (Si_Buy). Type <color=#39ff14>/koh</color> for live capture status.",
                 new (string, float)[] { ("sounds/intro_07a.wav", 3.70f), ("sounds/intro_07b.wav", 3.53f) }),
         };
         // Tiny gap inserted between consecutive clips of the same line so the audio
@@ -104,7 +94,7 @@ namespace Si_KingOfTheHill
         {
             _configPath = Path.Combine("UserData", "KingOfTheHill_cfg", "Si_KingOfTheHill_Config.json");
             LoadConfig();
-            MelonLogger.Msg("Si_KingOfTheHill v0.1.0 loaded (scaffold — game logic not yet implemented).");
+            MelonLogger.Msg($"Si_KingOfTheHill v0.5.0 loaded. Enabled={Cfg.Enabled}");
 
             // Lifecycle hooks. GameEvents.* clears across scene transitions; re-hook in OnSceneWasLoaded.
             GameEvents.OnGameStarted += OnGameStarted;
@@ -113,14 +103,6 @@ namespace Si_KingOfTheHill
             // Damage immunity for the KoH building.
             InstallDamagePatch(HarmonyInstance);
 
-            // Reward system (kill events).
-            HookRewards();
-
-            // /buy menu /1-/N chat navigation.
-            HookBuyChat();
-
-            // Headhunter bounty list (separate JSON in UserData/KingOfTheHill_cfg/Bounties.json).
-            LoadBountyConfig();
         }
 
         public override void OnLateInitializeMelon()
@@ -128,8 +110,7 @@ namespace Si_KingOfTheHill
             // /koh registered as a player command (hidden from chat). Admin-only sub-actions
             // are gated inside the handler via caller.CanAdminExecute(Power.Generic).
             PlayerMethods.RegisterPlayerCommand("koh", OnKohCommand, true);
-            PlayerMethods.RegisterPlayerCommand("buy", OnBuyCommand, true);
-            MelonLogger.Msg("Si_KingOfTheHill: Registered /koh and /buy commands.");
+            MelonLogger.Msg("Si_KingOfTheHill: Registered /koh command.");
 
             // Try to subscribe to Si_MapBalance now; if it loaded after us, we'll retry on first
             // game start. Subscription is the channel by which we learn the per-map KoH position.
@@ -146,17 +127,11 @@ namespace Si_KingOfTheHill
             GameEvents.OnGameStarted += OnGameStarted;
             GameEvents.OnGameEnded -= OnGameEnded;
             GameEvents.OnGameEnded += OnGameEnded;
-            // Rewards too.
-            ReHookRewards();
-            ReHookBuyChat();
         }
 
         static void OnGameStarted(GameMode mode)
         {
-            if (!ModeAnyActive) return;  // Mode 3 (Disabled) or master toggle off
-
-            // Stamp round start for time-locked purchases (Shrimp unlock, etc.).
-            _roundStartTime = Time.time;
+            if (!ModeKohActive) return;
 
             // NOTE: do NOT ResetKohState() here. Silica's GameEvents.OnGameStarted fires
             // SEVERAL SECONDS after MusicJukeboxHandler.OnGameStarted (which is the hook
@@ -164,36 +139,20 @@ namespace Si_KingOfTheHill
             // Resetting here would clobber the state MapBalance just populated.
             // State reset happens in OnGameEnded; OnMapBalanceSpecialsReady also clears+repopulates.
 
-            // Retry MapBalance subscription only when KoH gameplay is active.
-            if (ModeKohActive) TrySubscribeMapBalance();
+            // Retry MapBalance subscription (it may have loaded after us).
+            TrySubscribeMapBalance();
 
-            // Always load the dump — /buy needs it regardless of mode.
+            // Unit dump: display name -> production building, for the category weights.
             LoadUnitDump();
-            // Apply Si_UnitBalance's cost_mult overrides on top of the vanilla dump snapshot.
-            // Reading ConstructionData.ResourceCost would return vanilla (OM is a runtime
-            // overlay, not a field mutation), so we parse Si_UnitBalance_Config.json instead.
-            // Re-applied each round start so live config edits take effect on next round.
-            ApplyUnitBalanceCostOverrides();
 
-            if (ModeKohActive)
-            {
-                // Arm the startup-grace check (handled in OnUpdate).
-                _startupCheckTimer = STARTUP_CHECK_DELAY;
-                _startupCheckPending = true;
-            }
+            // Arm the startup-grace check (handled in OnUpdate).
+            _startupCheckTimer = STARTUP_CHECK_DELAY;
+            _startupCheckPending = true;
 
-            MelonLogger.Msg($"[KGT] OnGameStarted — map={UnityEngine.SceneManagement.SceneManager.GetActiveScene().name} (_hasKoh={_hasKoh}) Mode={Cfg.Mode}");
+            MelonLogger.Msg($"[KGT] OnGameStarted — map={UnityEngine.SceneManagement.SceneManager.GetActiveScene().name} (_hasKoh={_hasKoh}) buy={(BuyBridge.Active ? "linked" : "absent")}");
 
-            // Game-mode intro: only in Mode 1 + IntroEnabled + KoH actually spawned this round.
-            if (ModeKohActive && _hasKoh && Cfg.IntroEnabled) BroadcastIntro();
-
-            // Starter credits: grant to all currently connected players (Mode 1 & 2).
-            _starterCreditsGranted.Clear();
-            _starterCreditsCheckTimer = STARTER_CREDITS_CHECK_INTERVAL;
-            if (ModeBuyActive && Cfg.StarterCreditsPerPlayer > 0)
-            {
-                GrantStarterCreditsToAll();
-            }
+            // Game-mode intro: IntroEnabled + KoH actually spawned this round.
+            if (_hasKoh && Cfg.IntroEnabled) BroadcastIntro();
         }
 
         /// <summary>
@@ -282,34 +241,12 @@ namespace Si_KingOfTheHill
             _startupCheckPending = false;
             // Stop any in-flight intro so it doesn't bleed into the next round.
             ResetIntroState();
-            // Reset credits between rounds if configured.
-            if (Cfg.RewardResetOnGameEnd) ResetAllCredits();
-            // Also clear any active buy menus so they don't carry stale state across rounds.
-            ResetBuyState();
-            // Re-announce bounties at the start of the next round.
-            _announcedBounties.Clear();
             MelonLogger.Msg("[KGT] OnGameEnded — KoH state cleared.");
         }
 
         public override void OnUpdate()
         {
             if (!NetworkGameServer.GetServerStarted()) return;
-            if (!ModeAnyActive) return;
-
-            // Starter-credits + bounty-announcement poll (Mode 1 & 2). Both walk
-            // Player.Players, so we cycle them on the same 5-second timer.
-            if (ModeBuyActive)
-            {
-                _starterCreditsCheckTimer -= Time.deltaTime;
-                if (_starterCreditsCheckTimer <= 0f)
-                {
-                    _starterCreditsCheckTimer = STARTER_CREDITS_CHECK_INTERVAL;
-                    if (Cfg.StarterCreditsPerPlayer > 0) GrantStarterCreditsToAll();
-                    AnnounceBountiesIfNeeded();
-                }
-            }
-
-            // Everything below is Mode 1 (full KoH) only.
             if (!ModeKohActive) return;
 
             // Startup-grace check: after STARTUP_CHECK_DELAY, if MapBalance never registered
