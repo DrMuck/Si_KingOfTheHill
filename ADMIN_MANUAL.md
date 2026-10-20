@@ -219,6 +219,7 @@ One chat surface: **`/koh`** — admin configuration + live status (status itsel
 |--|--|
 | `/koh` or `/koh status` | One-line summary: ON/OFF, Si_Buy link, capture radius, exclusion radius, king + progress, last tick gain/cap, per-team handicap multipliers |
 | `/koh on` / `/koh off` | Master toggle (`Cfg.Enabled`) |
+| `/koh enabled` + `on` or `off` | Same toggle as one sub-command (used by the Si_ModUI switch; without argument prints the state) |
 | `/koh radius <m>` | Capture-zone radius |
 | `/koh threshold <pts>` | Win threshold (points to win) |
 | `/koh rate <pts/s>` | `MaxCapturePointsPerSecond` cap |

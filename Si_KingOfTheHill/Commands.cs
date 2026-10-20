@@ -30,6 +30,14 @@ namespace Si_KingOfTheHill
                 return;
             }
 
+            // "enabled on|off" = switch alias for the on/off words (used by Si_ModUI; "on"/"off" keep working).
+            if (sub == "enabled")
+            {
+                bool? en = ParseOnOff(val);
+                if (en == null) { Reply(caller, $"[KGT] {(Cfg.Enabled ? "ON" : "OFF")}"); return; }
+                sub = en.Value ? "on" : "off";
+            }
+
             switch (sub)
             {
                 case "on":
@@ -76,7 +84,7 @@ namespace Si_KingOfTheHill
                     Reply(caller, "[KGT] State cleared (king + accumulation + milestones).");
                     break;
                 default:
-                    Reply(caller, "/koh [status|on|off|radius <m>|threshold <pts>|rate <pts/s>|reset]  (credits, bounties and /buy: see Si_Buy, '/buy status')");
+                    Reply(caller, "/koh [status|on|off|enabled on|off|radius <m>|threshold <pts>|rate <pts/s>|reset]  (credits, bounties and /buy: see Si_Buy, '/buy status')");
                     break;
             }
         }

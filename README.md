@@ -54,6 +54,7 @@ All `/koh` subcommands gate on SilicaAdminMod's `CanAdminExecute(Power.Generic)`
 | Command | Effect |
 |--|--|
 | `/koh on` / `/koh off` | Master toggle (`Cfg.Enabled`) |
+| `/koh enabled` + `on` or `off` | Same toggle as one sub-command (used by the Si_ModUI switch; without argument prints the state) |
 | `/koh radius <m>` | Capture-zone radius (fallback only — usually defined by MapBalance per-map) |
 | `/koh threshold <pts>` | Win threshold (points to win) |
 | `/koh rate <pts/s>` | `MaxCapturePointsPerSecond` cap |

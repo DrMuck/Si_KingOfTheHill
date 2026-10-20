@@ -23,7 +23,7 @@ using System;
 using System.IO;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(Si_KingOfTheHill.KingOfTheHill), "King of the Galactic Teleport", "0.5.1", "DrMuck")]
+[assembly: MelonInfo(typeof(Si_KingOfTheHill.KingOfTheHill), "King of the Galactic Teleport", "0.5.2", "DrMuck")]
 [assembly: MelonGame("Bohemia Interactive", "Silica")]
 [assembly: MelonOptionalDependencies("Admin Mod", "Si_UnitBalance")]
 
@@ -94,7 +94,7 @@ namespace Si_KingOfTheHill
         {
             _configPath = Path.Combine(Paths.ConfigDir, "Si_KingOfTheHill_Config.json");
             LoadConfig();
-            MelonLogger.Msg($"Si_KingOfTheHill v0.5.1 loaded. Enabled={Cfg.Enabled}");
+            MelonLogger.Msg($"Si_KingOfTheHill v0.5.2 loaded. Enabled={Cfg.Enabled}");
 
             // Lifecycle hooks. GameEvents.* clears across scene transitions; re-hook in OnSceneWasLoaded.
             GameEvents.OnGameStarted += OnGameStarted;
