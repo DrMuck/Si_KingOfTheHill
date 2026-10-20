@@ -14,7 +14,7 @@
 
  Server-only mod (no client component required).
  Deploy: E:\Steam\steamapps\common\Silica Dedicated Server\Mods\Si_KingOfTheHill.dll
- Config: UserData\KingOfTheHill_cfg\Si_KingOfTheHill_Config.json
+ Config: UserData\cfg\KingOfTheHill\Si_KingOfTheHill_Config.json
 */
 
 using MelonLoader;
@@ -23,7 +23,7 @@ using System;
 using System.IO;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(Si_KingOfTheHill.KingOfTheHill), "King of the Galactic Teleport", "0.5.0", "DrMuck")]
+[assembly: MelonInfo(typeof(Si_KingOfTheHill.KingOfTheHill), "King of the Galactic Teleport", "0.5.1", "DrMuck")]
 [assembly: MelonGame("Bohemia Interactive", "Silica")]
 [assembly: MelonOptionalDependencies("Admin Mod", "Si_UnitBalance")]
 
@@ -92,9 +92,9 @@ namespace Si_KingOfTheHill
 
         public override void OnInitializeMelon()
         {
-            _configPath = Path.Combine("UserData", "KingOfTheHill_cfg", "Si_KingOfTheHill_Config.json");
+            _configPath = Path.Combine(Paths.ConfigDir, "Si_KingOfTheHill_Config.json");
             LoadConfig();
-            MelonLogger.Msg($"Si_KingOfTheHill v0.5.0 loaded. Enabled={Cfg.Enabled}");
+            MelonLogger.Msg($"Si_KingOfTheHill v0.5.1 loaded. Enabled={Cfg.Enabled}");
 
             // Lifecycle hooks. GameEvents.* clears across scene transitions; re-hook in OnSceneWasLoaded.
             GameEvents.OnGameStarted += OnGameStarted;

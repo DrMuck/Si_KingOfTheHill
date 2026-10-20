@@ -62,7 +62,7 @@ namespace Si_KingOfTheHill
             if (_dumpLoaded) return;
             _dumpLoaded = true; // single-shot regardless of outcome
 
-            string path = Path.Combine("UserData", "UnitBalance_cfg", "Si_UnitBalance_Dump.json");
+            string path = Paths.UnitBalanceFile("Si_UnitBalance_Dump.json");
             if (!File.Exists(path))
             {
                 MelonLogger.Warning($"[KGT] Unit dump not found at {path} — all units will fall back to '{Cfg.DefaultCategoryForUnknown}' category");

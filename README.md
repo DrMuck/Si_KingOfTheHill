@@ -25,7 +25,7 @@ Rewards the commander's **faction treasury** per tick (with an anti-snowball **h
 5. Copy `Si_KingOfTheHill.dll` to your server's `Mods/` folder
 6. (Optional) Copy intro/milestone/win wavs to `UserData/sounds/` — see the [sound library](https://github.com/DrMuck/Si_AddOn_Packages) in the add-on packages release
 
-On first start the mod auto-creates `UserData/KingOfTheHill_cfg/Si_KingOfTheHill_Config.json` with sensible defaults.
+On first start the mod auto-creates `UserData/cfg/KingOfTheHill/Si_KingOfTheHill_Config.json` with sensible defaults.
 
 ## Credit economy (Si_Buy)
 
@@ -74,7 +74,7 @@ inside the capture zone.
 
 ## Configuration
 
-`UserData/KingOfTheHill_cfg/Si_KingOfTheHill_Config.json` — the main config. A `Si_KingOfTheHill_Config.example.json` is shipped with this repo as a reference.
+`UserData/cfg/KingOfTheHill/Si_KingOfTheHill_Config.json` — the main config. A `Si_KingOfTheHill_Config.example.json` is shipped with this repo as a reference.
 
 `Cfg.WinThresholdPerMap` (dictionary, scene name → points) lets you scale game length to map size.
 
@@ -82,7 +82,7 @@ inside the capture zone.
 
 ## How it works
 
-KGT does not spawn the capture point itself. **[Si_MapBalance](https://github.com/DrMuck/Silica-MapBalance) owns the spawn**: at round start, if KGT is loaded and enabled, MapBalance prefers a layout JSON that carries a `koh` block (`UserData/Spawns/<MapName>/koh_*.json`), spawns the configured prefab on the configured team at the configured position, then fires its `OnSpecialsReady` event. KGT catches that event, grabs the spawned GameObject, builds the outpost ring, arms damage immunity, and starts ticking.
+KGT does not spawn the capture point itself. **[Si_MapBalance](https://github.com/DrMuck/Silica-MapBalance) owns the spawn**: at round start, if KGT is loaded and enabled, MapBalance prefers a layout JSON that carries a `koh` block (`UserData/cfg/Spawns/<MapName>/koh_*.json`), spawns the configured prefab on the configured team at the configured position, then fires its `OnSpecialsReady` event. KGT catches that event, grabs the spawned GameObject, builds the outpost ring, arms damage immunity, and starts ticking.
 
 ### Capture math (per tick, default `EvalIntervalSeconds = 1.0`)
 

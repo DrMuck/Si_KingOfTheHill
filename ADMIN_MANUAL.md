@@ -209,7 +209,7 @@ KGT also rewards the commander's **faction treasury** per tick, with an anti-sno
 
 One chat surface: **`/koh`** — admin configuration + live status (status itself is player-visible). The `/buy` economy is Si_Buy since KGT 0.5.0.
 
-> **Per-map radii**: `CaptureRadius` and `ExclusionRadius` (the no-build zone) are normally **defined in the MapBalance spawn config** — the `koh` block of `UserData/Spawns/<MapName>/koh_*.json`. KGT reads them from MapBalance at round start; the matching `Cfg.CaptureRadius` / `Cfg.BuildExclusionRadius` fields in `Si_KingOfTheHill_Config.json` act only as fallbacks when the spawn config doesn't provide a value. **To change a map's capture/no-build radius, edit that map's MapBalance JSON, not the KGT config.**
+> **Per-map radii**: `CaptureRadius` and `ExclusionRadius` (the no-build zone) are normally **defined in the MapBalance spawn config** — the `koh` block of `UserData/cfg/Spawns/<MapName>/koh_*.json`. KGT reads them from MapBalance at round start; the matching `Cfg.CaptureRadius` / `Cfg.BuildExclusionRadius` fields in `Si_KingOfTheHill_Config.json` act only as fallbacks when the spawn config doesn't provide a value. **To change a map's capture/no-build radius, edit that map's MapBalance JSON, not the KGT config.**
 
 ### `/koh` — config + status
 
@@ -244,7 +244,7 @@ new round starts
 Si_MapBalance picks a layout JSON for the map
   ↓
   IF (KGT loaded AND KGT.ModeKohActive)
-    → prefers a layout that has a "koh" block (e.g. UserData/Spawns/Citadel/koh_test_citadel.json)
+    → prefers a layout that has a "koh" block (e.g. UserData/cfg/Spawns/Citadel/koh_test_citadel.json)
     → spawns the koh.PrefabName (e.g. Sol_UltraHeavyFactory) at koh.Position on team koh.Team (default Wildlife)
   ↓
 Si_MapBalance fires its public OnSpecialsReady event
@@ -331,7 +331,7 @@ Defaults give: dominant team at 2× avg → 0.50× reward; trailing team at 0.5�
 ### What MapBalance does for KGT specifically
 
 1. **Layout selection bias** — `Si_MapBalance.IsKohModLoaded()` reflect-calls `Si_KingOfTheHill.KingOfTheHill.ModeKohActive`. When `true`, the layout picker prefers JSONs that carry a `koh` block. When `false` (`Enabled: false`), the picker treats KGT as not loaded.
-2. **Per-map spawn data** — `koh.PrefabName`, `koh.Position`, `koh.Team`, `koh.CaptureRadius`, `koh.ExclusionRadius` all live in the spawn-config JSON under `UserData/Spawns/<MapName>/koh_*.json`. Tune them per map.
+2. **Per-map spawn data** — `koh.PrefabName`, `koh.Position`, `koh.Team`, `koh.CaptureRadius`, `koh.ExclusionRadius` all live in the spawn-config JSON under `UserData/cfg/Spawns/<MapName>/koh_*.json`. Tune them per map.
 3. **The publish handoff** — MapBalance writes `MapBalanceSpecials.Koh = { Obj, CaptureRadius, ExclusionRadius }` after spawning and fires `OnSpecialsReady`. KGT's only knowledge of *where* the capture point is comes from that public field.
 
 To **disable KGT on a single map**, remove the `koh` block from that map's spawn-config JSON. KGT will broadcast the *"mod not active, spawn cfg missing"* notice and the round runs as normal Strategy.
