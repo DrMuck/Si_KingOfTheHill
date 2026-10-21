@@ -23,7 +23,7 @@ using System;
 using System.IO;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(Si_KingOfTheHill.KingOfTheHill), "King of the Galactic Teleport", "0.5.2", "DrMuck")]
+[assembly: MelonInfo(typeof(Si_KingOfTheHill.KingOfTheHill), "King of the Galactic Teleport", "0.5.4", "DrMuck")]
 [assembly: MelonGame("Bohemia Interactive", "Silica")]
 [assembly: MelonOptionalDependencies("Admin Mod", "Si_UnitBalance")]
 

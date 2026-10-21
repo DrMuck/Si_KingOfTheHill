@@ -13,14 +13,11 @@ namespace Si_KingOfTheHill
             {
                 string F(float v) => v.ToString("0.##", CultureInfo.InvariantCulture);
                 string king = "No king (zone empty or contested)";
-                if (_currentKing != null)
-                {
-                    float acc = GetCurrentProgress(_currentKing);
-                    float pct = _winThreshold > 0f ? acc / _winThreshold * 100f : 0f;
-                    king = "King: " + SafeTeamName(_currentKing) + " " + pct.ToString("F0", CultureInfo.InvariantCulture) + "% (" +
-                           acc.ToString("F0", CultureInfo.InvariantCulture) + "/" + _winThreshold.ToString("F0", CultureInfo.InvariantCulture) + ")";
-                }
+                // Progress numbers stay out of the export: they change every capture tick and would push a frame diff
+                // to every client each time (Si_ModUI rule: deterministic exports). /koh shows the live numbers.
+                if (_currentKing != null) king = "King: " + SafeTeamName(_currentKing) + " (progress: /koh)";
                 return ModUI.ModUIExport.New()
+                    .Enabled(Cfg.Enabled)
                     .Info("KGT " + (Cfg.Enabled ? "ON" : "OFF") + " | buy=" + (BuyBridge.Active ? "linked" : "absent") +
                           " | r=" + F(_captureRadius) + "m excl=" + F(Cfg.BuildExclusionRadius) + "m")
                     .Info(king)
